@@ -1,5 +1,26 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Grant tool testing console
+
+The KONA-styled testing console lives at [`/console`](http://localhost:3000/console).
+It drives the three-phase pipeline (draft → critique → shorten), visualizes each
+backend call (provider, model, latency, raw response, demo-fallback flag), and
+runs the character-budget knapsack solver entirely client-side
+(`src/lib/solver.ts`).
+
+It works with zero backend connectivity: on load it renders hardcoded demo data
+and the slider/solver are fully functional. Click **Run pipeline** to make live
+calls.
+
+Point it at the FastAPI backend by copying `.env.local.example` to `.env.local`:
+
+```
+NEXT_PUBLIC_API_BASE=http://localhost:8000
+```
+
+Only this base URL is exposed to the browser — all API keys stay server-side in
+`backend/.env`.
+
 ## Getting Started
 
 First, run the development server:
