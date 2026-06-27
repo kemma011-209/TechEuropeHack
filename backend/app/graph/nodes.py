@@ -14,11 +14,10 @@ from .. import config, demo, llm, parsing, prompts, wordspace
 from ..context.bundle import ContextBundle, IngestedDocument, SearchResult, merge_bundle
 from ..context import ingest, search
 from ..personas import BUILTIN_PERSONAS, PersonaConfig, persona_names
-from .knapsack import WordToken
 from .state import PipelineState
 
 # Value weights tagging edit-derived words above base text (used for the UI
-# highlight). The interactive budget ladder is produced by the LLM, not here.
+# highlight).
 _BASE_WORD_VALUE = 0.3
 _EDIT_WORD_VALUE = 0.85
 
@@ -334,14 +333,14 @@ async def apply_review(state: PipelineState) -> dict:
     tokens = wordspace.tag_words_by_diff(draft, improved)
 
     word_tokens = [
-        WordToken(
-            index=i,
-            text=str(t.get("text", "")),
-            source=str(t.get("source", "base")),
-            value=(
+        {
+            "index": i,
+            "text": str(t.get("text", "")),
+            "source": str(t.get("source", "base")),
+            "value": (
                 _EDIT_WORD_VALUE if t.get("source") == "edit" else _BASE_WORD_VALUE
             ),
-        )
+        }
         for i, t in enumerate(tokens)
     ]
 
@@ -382,27 +381,31 @@ async def apply_review(state: PipelineState) -> dict:
     }
 
 
-# --- 6. Assemble (full improved answer; sizing happens via the LLM ladder) --
+# --- 6. Assemble (full improved answer; sizing happens interactively via /fit) --
 async def fit_budget(state: PipelineState) -> dict:
-    """Assemble the full improved answer. No knapsack.
+    """Assemble the full improved answer.
 
     The draft is improved by the critic span-merge; this node just emits the
     full assembled text and word list. Fitting to a character budget is done
-    interactively by the LLM "ladder" endpoint (progressively shorter, fully
-    grammatical versions), not by deterministic word trimming.
+    interactively by the dynamic ops-based /fit endpoint.
     """
     draft = state.get("draft", demo.DEMO_DRAFT)
-    words = [WordToken.from_dict(w) for w in state.get("words", [])]
+    words = state.get("words", [])
 
     if not words:
         words = [
-            WordToken(index=i, text=w, source="base", value=_BASE_WORD_VALUE)
+            {
+                "index": i,
+                "text": w,
+                "source": "base",
+                "value": _BASE_WORD_VALUE,
+            }
             for i, w in enumerate(_draft_words(draft))
         ]
 
-    final = " ".join(w.text for w in words)
+    final = " ".join(w["text"] for w in words)
     return {
-        "words": [w.to_dict() for w in words],
+        "words": words,
         "result": {
             "keptIndices": list(range(len(words))),
             "totalChars": len(final),

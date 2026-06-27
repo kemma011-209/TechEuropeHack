@@ -151,29 +151,39 @@ def wordspace_chat_user(
     return f"Current words:\n{indexed}\n\nUser request: {message}{ref_line}"
 
 
-# --- Budget ladder (LLM writes a stack of progressively shorter versions) ---
-LADDER_SYSTEM = (
-    "You shorten a grant application answer into a LADDER of progressively "
-    "shorter versions. You are given the answer and a list of target character "
-    "lengths. Write exactly one version for each target. Every version must:\n"
-    "- be a COMPLETE, fluent, grammatical answer - never a fragment or a list of "
-    "keywords;\n"
-    "- be at or under its target character count, but as CLOSE to the target as "
-    "possible (do not over-shorten);\n"
-    "- keep the company/subject and the single most important claim;\n"
-    "- drop the least important detail first as the target shrinks;\n"
-    "- rephrase and re-connect words freely so it always reads naturally.\n\n"
-    "Return ONLY a JSON array, longest version first, one object per target:\n"
-    '[{"target": <int>, "text": "<version>"}, ...]'
+# --- Budget fit (dynamic ops-based size reduction) --------------------------
+FIT_SYSTEM = (
+    "You compress a grant application answer to fit a target character budget. "
+    "The answer is an indexed list of words with character counts. You may ONLY "
+    "change it by emitting structured operations - NEVER rewrite the text directly.\n\n"
+    "Your job: cut enough words to reach the target length while maintaining "
+    "perfect grammar and flow. You must emit `delete` operations for the words you "
+    "want to drop, and you may emit `insert` and `replace` operations to add "
+    "connectives or swap in shorter phrases to keep the sentence grammatical.\n\n"
+    "ALL indices refer to the ORIGINAL list. An insert's 'before' is the original "
+    "index the new word goes in front of (use the list length to append at the "
+    "end). Because every index is original, you do not need to account for "
+    "shifting.\n\n"
+    "Keep word 0 (the subject). You MUST reach the target length.\n\n"
+    "Return ONLY this JSON object and nothing else:\n"
+    '{"delete": [<int>, ...], "replace": [{"index": <int>, "word": "<word>"}, ...], '
+    '"insert": [{"before": <int>, "word": "<word>"}, ...], "reply": "<one short sentence>"}'
 )
 
 
-def ladder_user(text: str, targets: list[int]) -> str:
-    tlist = ", ".join(str(t) for t in targets)
+def fit_user(words: list[str], target: int) -> str:
+    lines = []
+    current_chars = sum(len(w) for w in words) + (len(words) - 1)
+    to_cut = max(0, current_chars - target)
+    for i, w in enumerate(words):
+        lines.append(f"{i}: '{w}' ({len(w)} chars)")
+    indexed = "\n".join(lines)
     return (
-        f"Answer:\n{text}\n\n"
-        f"Target lengths in characters (write one version for each): {tlist}\n\n"
-        "Return the JSON array only."
+        f"Current length: {current_chars} characters.\n"
+        f"Target length: at most {target} characters.\n"
+        f"You MUST cut at least {to_cut} characters.\n\n"
+        f"Words:\n{indexed}\n\n"
+        "Return the JSON operations to reach the target length while staying grammatical."
     )
 
 

@@ -92,13 +92,18 @@ export interface WordspaceChatResponse {
   meta: PhaseMeta;
 }
 
-export interface LadderVersion {
-  chars: number;
+export interface FitToken {
+  index?: number;
   text: string;
+  source: "base" | "edit" | "glue";
+  value?: number;
 }
 
-export interface LadderResponse {
-  versions: LadderVersion[];
+export interface FitResponse {
+  tokens: FitToken[];
+  ops: WordOp[];
+  dropped: WordOp[];
+  reply: string;
   source: string;
   meta: PhaseMeta;
 }

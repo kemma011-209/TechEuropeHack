@@ -7,7 +7,7 @@ import type {
   PersonaConfig,
   PhaseMeta,
   PipelineRunResponse,
-  LadderResponse,
+  FitResponse,
   RankResponse,
   SentenceResponse,
   ShortenResponse,

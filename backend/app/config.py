@@ -52,7 +52,7 @@ TAVILY_API_KEY = _get("TAVILY_API_KEY")
 # --- Models ----------------------------------------------------------------
 # Google Generative Language API. gemini-3.5-flash is the model proven to work
 # by backend/quicktest.py against this key.
-GEMMA_MODEL = _get("GEMMA_MODEL", default="gemini-3.5-flash")
+GEMMA_MODEL = _get("GEMMA_MODEL", default="gemini-3.0-pro")
 # The drafter uses a (potentially more powerful) model; its outputs + accepted
 # finals are the post-training signal. Falls back to GEMMA_MODEL when unset.
 GEMMA_DRAFT_MODEL = _get("GEMMA_DRAFT_MODEL", default="") or GEMMA_MODEL

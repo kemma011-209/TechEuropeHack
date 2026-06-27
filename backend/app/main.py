@@ -83,10 +83,9 @@ class WordspaceChatRequest(BaseModel):
     refs: list[int] = []  # indices of words the user clicked as references
 
 
-class LadderRequest(BaseModel):
-    text: str = ""
-    max_chars: int = 400
-    min_chars: int = 50
+class FitRequest(BaseModel):
+    tokens: list[WordTokenIn] = []
+    target_chars: int = 150
 
 
 class GatherRequest(BaseModel):
@@ -486,65 +485,67 @@ async def wordspace_chat(req: WordspaceChatRequest):
     }
 
 
-def _ladder_targets(max_c: int, min_c: int, steps: int = 8) -> list[int]:
-    """Evenly spaced descending target lengths from max_c down to min_c."""
-    if max_c <= min_c or steps <= 1:
-        return [max_c]
-    span = max_c - min_c
-    raw = [int(round(max_c - span * i / (steps - 1))) for i in range(steps)]
-    return sorted({t for t in raw if t > 0}, reverse=True)
+@app.post("/api/wordspace/fit")
+async def wordspace_fit(req: FitRequest):
+    """Dynamic ops-based fit. The LLM acts as the sole decider (no knapsack).
 
-
-@app.post("/api/wordspace/ladder")
-async def wordspace_ladder(req: LadderRequest):
-    """Build a stack of progressively shorter, fully grammatical versions.
-
-    One LLM call writes a complete version at each target length; the frontend
-    slider then snaps to the version closest to (and within) the chosen budget.
-    No knapsack, no word trimming - every rung is a whole sentence the model
-    wrote, so it always reads grammatically.
+    Given the indexed words and a target char count, it returns delete, replace,
+    and insert ops to hit the target length grammatically. Applied as one batch.
     """
-    text = (req.text or "").strip()
-    full_len = len(text)
-    if not text:
+    target = max(1, int(req.target_chars))
+    src_tokens = [{"text": t.text, "source": t.source} for t in req.tokens]
+    words = [t.text for t in req.tokens]
+
+    if not src_tokens or sum(len(w) for w in words) + max(0, len(words) - 1) <= target:
         return {
-            "versions": [],
+            "tokens": src_tokens,
+            "ops": [],
+            "reply": "Already within budget.",
             "source": "local",
             "meta": {"provider": "local", "ok": True, "fallback": False},
         }
 
-    max_c = min(int(req.max_chars), full_len) if full_len else int(req.max_chars)
-    min_c = max(20, min(int(req.min_chars), max_c))
-    targets = _ladder_targets(max_c, min_c)
-
-    out, meta = await llm.gemma_generate(
-        prompts.LADDER_SYSTEM,
-        prompts.ladder_user(text, targets),
-        max_tokens=4096,
-        thinking_budget=0,
+    text, meta = await llm.gemma_generate(
+        prompts.FIT_SYSTEM,
+        prompts.fit_user(words, target),
+        max_tokens=2048,
     )
 
-    # The full answer is always the top rung.
-    versions: list[dict] = [{"chars": full_len, "text": text}]
-    if meta["ok"] and out:
+    deletes: list = []
+    inserts: list = []
+    replaces: list = []
+    reply = ""
+    if meta["ok"] and text:
         try:
-            for item in parsing.parse_json_array(out):
-                if isinstance(item, dict):
-                    t = str(item.get("text", "")).strip()
-                    if t:
-                        versions.append({"chars": len(t), "text": t})
+            obj = parsing.parse_json_object(text)
+            deletes = obj.get("delete", []) or []
+            inserts = obj.get("insert", []) or []
+            replaces = obj.get("replace", []) or []
+            reply = str(obj.get("reply", ""))
         except (ValueError, json.JSONDecodeError) as exc:
-            meta["error"] = f"ladder parse failed: {exc}"
+            meta["error"] = f"fit parse failed: {exc}"
             meta["parse_failed"] = True
 
-    # Dedupe by text, sort longest-first.
-    seen: set[str] = set()
-    uniq: list[dict] = []
-    for v in sorted(versions, key=lambda x: x["chars"], reverse=True):
-        if v["text"] in seen:
-            continue
-        seen.add(v["text"])
-        uniq.append(v)
+    # Assemble all valid ops into a single list for apply_ops_to_tokens
+    ops: list[dict] = []
+    for d in deletes:
+        ops.append({"op": "delete", "index": d})
+    for r in replaces:
+        if isinstance(r, dict):
+            ops.append({"op": "replace", "index": r.get("index"), "word": r.get("word")})
+    for i in inserts:
+        if isinstance(i, dict):
+            ops.append({"op": "insert", "before": i.get("before", i.get("index")), "word": i.get("word")})
+
+    # The drift-free batch apply handles these properly against original indices
+    new_tokens, applied, dropped = wordspace.apply_ops_to_tokens(src_tokens, ops)
 
     source = "gemma" if (meta.get("ok") and not meta.get("parse_failed")) else "none"
-    return {"versions": uniq, "source": source, "meta": meta}
+    return {
+        "tokens": new_tokens,
+        "ops": applied,
+        "dropped": dropped,
+        "reply": reply or "Fitted to budget.",
+        "source": source,
+        "meta": meta,
+    }
