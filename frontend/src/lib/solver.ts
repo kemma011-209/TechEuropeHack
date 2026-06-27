@@ -1,139 +1,96 @@
-import type { Slot, SolverResult } from "./types";
+import type { WordResult, WordToken } from "./types";
 
 /**
- * Multiple-choice knapsack over a character budget. Pure synchronous JS: never
- * calls an LLM, never asks a model to count characters.
+ * Word-level budget fitter (mirrors backend/app/graph/knapsack.py).
  *
- * Pick exactly one variant per slot to maximise summed quality subject to
- * summed chars <= budget. A slot with `lockedVariantId` is forced to that
- * variant (the user's manual override); the solver works around it.
+ * Trims the answer to a character budget by removing the lowest-value words
+ * first (value, then original order). Two properties the UI relies on:
  *
- * DP over the budget axis. dp[c] = best total quality achievable using slots
- * processed so far with exactly <= c characters, plus the back-pointers needed
- * to reconstruct the per-slot selection.
+ * - Edit-derived words are protected: base filler is dropped before edits.
+ * - Monotonic slider: the kept set at a higher budget is a superset of the kept
+ *   set at a lower budget, so dragging the budget down removes words and
+ *   dragging it back up re-adds the same words.
+ *
+ * Pure synchronous JS: never calls an LLM, never asks a model to count chars.
  */
 
-interface Candidate {
-  variantId: string;
-  chars: number;
-  quality: number;
+/** Character length of the words joined by single spaces. */
+export function assembledLen(words: WordToken[]): number {
+  if (words.length === 0) return 0;
+  return words.reduce((sum, w) => sum + w.text.length, 0) + (words.length - 1);
 }
 
-interface Cell {
-  quality: number;
-  // selection for this prefix of slots at this budget
-  selection: Record<string, string>;
-  feasible: boolean;
+// Mirror of backend/app/graph/knapsack.py _STOPWORDS.
+const STOPWORDS = new Set([
+  "a", "an", "the", "and", "or", "but", "of", "to", "in", "on", "for", "with",
+  "into", "from", "by", "at", "as", "that", "which", "is", "are", "be", "our",
+  "their", "its", "this", "these", "those", "then", "via", "using",
+]);
+
+/** Lower = removed earlier. Mirrors backend _removal_priority. */
+function removalPriority(word: WordToken, index: number): number {
+  const text = word.text.replace(/^[.,;:()"']+|[.,;:()"']+$/g, "");
+  let priority = word.value;
+  if (index === 0) priority += 1.0;
+  else if (/^[A-Z]/.test(text)) priority += 0.2;
+  if (STOPWORDS.has(text.toLowerCase())) priority -= 0.15;
+  return priority;
 }
 
-function candidatesFor(slot: Slot, budget: number): Candidate[] {
-  let pool = slot.variants;
-  if (slot.lockedVariantId) {
-    pool = pool.filter((v) => v.id === slot.lockedVariantId);
-  }
-  return pool
-    .filter((v) => v.chars <= budget)
-    .map((v) => ({ variantId: v.id, chars: v.chars, quality: v.quality }));
-}
-
-/** Cheapest variant for a slot, used to keep an infeasible slot from killing the whole answer. */
-function cheapestVariant(slot: Slot): Candidate {
-  const pool = slot.lockedVariantId
-    ? slot.variants.filter((v) => v.id === slot.lockedVariantId)
-    : slot.variants;
-  const best = [...pool].sort((a, b) => a.chars - b.chars)[0] ?? slot.variants[0];
-  return { variantId: best.id, chars: best.chars, quality: best.quality };
-}
-
-export function solve(slots: Slot[], budgetChars: number): SolverResult {
+export function solveWords(words: WordToken[], budgetChars: number): WordResult {
   const budget = Math.max(0, Math.floor(budgetChars));
-
-  // dp indexed by character spend 0..budget.
-  let dp: (Cell | null)[] = new Array(budget + 1).fill(null);
-  dp[0] = { quality: 0, selection: {}, feasible: true };
-
-  for (const slot of slots) {
-    const next: (Cell | null)[] = new Array(budget + 1).fill(null);
-    const cands = candidatesFor(slot, budget);
-
-    // If no variant fits the budget, force the cheapest one (answer becomes
-    // infeasible/over-budget but still assembled, matching the over-budget UI).
-    const effective = cands.length > 0 ? cands : [cheapestVariant(slot)];
-    const slotFeasible = cands.length > 0;
-
-    for (let c = 0; c <= budget; c++) {
-      const cur = dp[c];
-      if (!cur) continue;
-      for (const cand of effective) {
-        const nc = c + cand.chars;
-        const idx = Math.min(nc, budget); // clamp so infeasible spend still tracked at the ceiling
-        const cand_quality = cur.quality + cand.quality;
-        const cand_feasible = cur.feasible && slotFeasible && nc <= budget;
-        const existing = next[idx];
-        const better =
-          !existing ||
-          (cand_feasible && !existing.feasible) ||
-          (cand_feasible === existing.feasible && cand_quality > existing.quality);
-        if (better) {
-          next[idx] = {
-            quality: cand_quality,
-            selection: { ...cur.selection, [slot.id]: cand.variantId },
-            feasible: cand_feasible,
-          };
-        }
-      }
-    }
-    dp = next;
+  const n = words.length;
+  if (n === 0) {
+    return { keptIndices: [], totalChars: 0, totalValue: 0, feasible: true };
   }
 
-  // Best feasible cell at the highest quality; prefer feasible over infeasible.
-  let best: Cell | null = null;
-  let bestChars = 0;
-  for (let c = 0; c <= budget; c++) {
-    const cell = dp[c];
-    if (!cell) continue;
-    if (
-      !best ||
-      (cell.feasible && !best.feasible) ||
-      (cell.feasible === best.feasible && cell.quality > best.quality)
-    ) {
-      best = cell;
-      bestChars = c;
-    }
+  // Removal order: lowest priority first; ties broken from the END so the
+  // opening subject+verb survive. Fixed total order keeps the slider monotonic.
+  const removalOrder = words
+    .map((w, i) => i)
+    .sort(
+      (a, b) =>
+        removalPriority(words[a], a) - removalPriority(words[b], b) || b - a
+    );
+
+  const kept = new Set<number>(words.map((_, i) => i));
+  const currentLen = () =>
+    assembledLen([...kept].sort((a, b) => a - b).map((i) => words[i]));
+
+  let ri = 0;
+  while (currentLen() > budget && kept.size > 1 && ri < n) {
+    kept.delete(removalOrder[ri]);
+    ri += 1;
   }
 
-  if (!best) {
-    return { selection: {}, totalChars: 0, totalQuality: 0, feasible: slots.length === 0 };
-  }
-
-  // Recompute exact char total from the actual selection (clamping above can
-  // understate it for infeasible answers).
-  const totalChars = slots.reduce((sum, slot) => {
-    const vid = best!.selection[slot.id];
-    const v = slot.variants.find((x) => x.id === vid);
-    return sum + (v ? v.chars : 0);
-  }, 0);
-
+  const keptIndices = [...kept].sort((a, b) => a - b);
+  const chosen = keptIndices.map((i) => words[i]);
+  const totalChars = assembledLen(chosen);
   return {
-    selection: best.selection,
+    keptIndices,
     totalChars,
-    totalQuality: best.quality,
-    feasible: best.feasible && totalChars <= budget,
+    totalValue: chosen.reduce((sum, w) => sum + w.value, 0),
+    feasible: totalChars <= budget,
   };
 }
 
+/** Join the kept words in original order into the final answer. */
+export function assembleWords(words: WordToken[], result: WordResult): string {
+  return result.keptIndices.map((i) => words[i]?.text ?? "").join(" ").trim();
+}
+
 /**
- * Precompute the solver result for every budget level in [min, max] in one
- * pass so the slider is an O(1) lookup with no recompute on drag.
+ * Precompute the solver result for every budget level in [min, max] so the
+ * slider is an O(1) lookup with no recompute on drag.
  */
 export function precomputeAllBudgets(
-  slots: Slot[],
+  words: WordToken[],
   min: number,
   max: number
-): Map<number, SolverResult> {
-  const table = new Map<number, SolverResult>();
+): Map<number, WordResult> {
+  const table = new Map<number, WordResult>();
   for (let b = min; b <= max; b++) {
-    table.set(b, solve(slots, b));
+    table.set(b, solveWords(words, b));
   }
   return table;
 }

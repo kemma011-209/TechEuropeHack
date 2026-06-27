@@ -1,8 +1,12 @@
 import { DEMO_CRITICS, DEMO_DRAFT } from "./demo";
 import type {
+  AcceptResponse,
   CritiqueResponse,
   DraftResponse,
+  GatherResponse,
+  PersonaConfig,
   PhaseMeta,
+  PipelineRunResponse,
   RankResponse,
   SentenceResponse,
   ShortenResponse,
@@ -33,7 +37,10 @@ async function post<T>(path: string, body: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status}${detail ? `: ${detail.slice(0, 200)}` : ""}`);
+  }
   return (await res.json()) as T;
 }
 
@@ -130,6 +137,74 @@ export async function editWordspace(
       source: "demo",
       meta: demoMeta("backend unreachable"),
     };
+  }
+}
+
+// --- LangGraph pipeline -----------------------------------------------------
+export interface GatherInput {
+  topic?: string;
+  company_name?: string;
+  user_blurb?: string;
+  document_name?: string;
+  document_b64?: string;
+}
+
+/** Context gathering gate: returns a ready ContextBundle (fail-soft). */
+export async function gather(input: GatherInput): Promise<GatherResponse> {
+  try {
+    return await post<GatherResponse>("/api/context/gather", input);
+  } catch (err) {
+    throw new Error(
+      `Backend unreachable at ${API_BASE} (${String(err)}). Is uvicorn running on port 8000?`
+    );
+  }
+}
+
+/** Run the full graph: parallel meta-harness + draft -> critique -> knapsack. */
+export async function runPipeline(
+  question: string,
+  contextBundle: unknown,
+  charLimit?: number
+): Promise<PipelineRunResponse> {
+  try {
+    return await post<PipelineRunResponse>("/api/pipeline/run", {
+      question,
+      context_bundle: contextBundle,
+      char_limit: charLimit,
+    });
+  } catch (err) {
+    throw new Error(
+      `Pipeline failed (${String(err)}). Check backend at ${API_BASE} and browser console for CORS errors.`
+    );
+  }
+}
+
+/** Log an accepted answer as post-training data (single write on accept). */
+export async function accept(payload: {
+  question: string;
+  draft: string;
+  final: string;
+  char_limit?: number;
+  topic?: string;
+  context?: unknown;
+  critiques?: unknown[];
+  planned_ops?: unknown[];
+  words?: unknown[];
+  selections?: Record<string, string>;
+  personas?: PersonaConfig[];
+  providers?: Record<string, unknown>;
+  session_id?: string;
+}): Promise<AcceptResponse> {
+  return post<AcceptResponse>("/api/accept", payload);
+}
+
+export async function listPersonas(): Promise<{ personas: PersonaConfig[] }> {
+  try {
+    const res = await fetch(`${API_BASE}/api/personas`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return (await res.json()) as { personas: PersonaConfig[] };
+  } catch {
+    return { personas: [] };
   }
 }
 

@@ -1,18 +1,18 @@
 """Quick connectivity test for the Gemini/Gemma API key in .env.
 
-Run:  python quicktest.py
+Run:  python scripts/quicktest.py   (from the backend/ directory)
 
 Reads GEMMA_API_KEY from backend/.env (no extra dependencies) and tries a few
 model + auth combinations, printing the first that works.
 """
 
 import json
-import os
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-ENV_PATH = Path(__file__).with_name(".env")
+# scripts/ lives under backend/, so .env is one directory up.
+ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 BASE = "https://generativelanguage.googleapis.com/v1beta"
 
 # Latest flash model (verified against this key's ListModels output).

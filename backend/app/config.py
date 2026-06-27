@@ -50,6 +50,9 @@ SUPERLINKED_API_KEY = _get("SUPERLINKED_API_KEY", "SUPERLINKED_API_KEy")
 # Google Generative Language API. gemini-3.5-flash is the model proven to work
 # by backend/quicktest.py against this key.
 GEMMA_MODEL = _get("GEMMA_MODEL", default="gemini-3.5-flash")
+# The drafter uses a (potentially more powerful) model; its outputs + accepted
+# finals are the post-training signal. Falls back to GEMMA_MODEL when unset.
+GEMMA_DRAFT_MODEL = _get("GEMMA_DRAFT_MODEL", default="") or GEMMA_MODEL
 GEMMA_BASE_URL = _get(
     "GEMMA_BASE_URL",
     default="https://generativelanguage.googleapis.com/v1beta",
@@ -67,6 +70,15 @@ SUPERLINKED_MODEL = _get("SUPERLINKED_MODEL", default="Qwen/Qwen3-4B-Instruct-25
 # score variant relevance, feeding the solver's quality weights.
 SUPERLINKED_RERANK_MODEL = _get(
     "SUPERLINKED_RERANK_MODEL", default="cross-encoder/ms-marco-MiniLM-L-6-v2"
+)
+
+# --- Post-training store ---------------------------------------------------
+# SQLite file that accumulates accepted answers (draft, final, char limit, ...)
+# as a DPO-ready dataset. Written only on user accept. Defaults to a file next
+# to the backend package so it survives reloads.
+STORE_DB_PATH = _get(
+    "STORE_DB_PATH",
+    default=str(Path(__file__).resolve().parent.parent / "training_data.sqlite"),
 )
 
 # --- CORS ------------------------------------------------------------------

@@ -1,10 +1,13 @@
 """Quick connectivity + smoke test for the Tavily Search API.
 
-Run:  python tavily_test.py
+Run:  python scripts/tavily_test.py   (from the backend/ directory)
 
 Reads TAVILY_API_KEY from backend/.env (no extra dependencies) and asks Tavily
 for advice on applying to Y Combinator's summer batch, printing the LLM-generated
 answer and the ranked sources it was grounded on.
+
+NOTE: This is the reference implementation for app/context/search.py. A colleague
+is wiring this call behind the async web_search() interface used by the pipeline.
 """
 
 import json
@@ -19,7 +22,8 @@ from pathlib import Path
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-ENV_PATH = Path(__file__).with_name(".env")
+# scripts/ lives under backend/, so .env is one directory up.
+ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 SEARCH_URL = "https://api.tavily.com/search"
 
 QUERY = (

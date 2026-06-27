@@ -48,10 +48,26 @@ def _meta(
     }
 
 
-async def gemma_generate(system: str, user: str, max_tokens: int = 512) -> tuple[str, dict[str, Any]]:
-    """Call Google's generateContent endpoint. Returns (text, meta)."""
+async def gemma_generate(
+    system: str,
+    user: str,
+    max_tokens: int = 512,
+    model: str | None = None,
+    thinking_budget: int | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Call Google's generateContent endpoint. Returns (text, meta).
+
+    `model` overrides the default GEMMA_MODEL (used by the drafter, which may run
+    a more powerful model than the critic swarm).
+
+    `thinking_budget` controls the Gemini "thinking" token budget. Pass 0 to
+    DISABLE thinking entirely: thinking tokens count against maxOutputTokens, so
+    a reasoning model can burn the whole budget thinking and return empty visible
+    text. For short, format-constrained outputs (draft text, JSON op plans) we
+    disable thinking so the model spends its tokens on the actual answer.
+    """
     started = time.perf_counter()
-    model = config.GEMMA_MODEL
+    model = model or config.GEMMA_MODEL
 
     if not config.gemma_configured():
         return "", _meta(
@@ -67,10 +83,13 @@ async def gemma_generate(system: str, user: str, max_tokens: int = 512) -> tuple
         "Content-Type": "application/json",
         "x-goog-api-key": config.GEMMA_API_KEY,
     }
+    generation_config: dict[str, Any] = {"maxOutputTokens": max_tokens}
+    if thinking_budget is not None:
+        generation_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
     body = {
         "contents": [{"role": "user", "parts": [{"text": user}]}],
         "systemInstruction": {"parts": [{"text": system}]},
-        "generationConfig": {"maxOutputTokens": max_tokens},
+        "generationConfig": generation_config,
     }
 
     try:

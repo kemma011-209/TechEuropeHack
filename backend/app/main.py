@@ -8,15 +8,25 @@ never returns a 5xx for an upstream LLM failure.
 
 import json
 import math
-import re
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from . import config, demo, llm, prompts, wordspace
+from . import config, demo, llm, parsing, personas, prompts, store, wordspace
+from .context.bundle import ContextBundle
+from .graph import run_pipeline
 
-app = FastAPI(title="TechEuropeHack API")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # Ensure the post-training SQLite table exists before any accept call.
+    store.init_db()
+    yield
+
+
+app = FastAPI(title="TechEuropeHack API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -61,6 +71,37 @@ class WordspaceEditRequest(BaseModel):
     message: str = ""
 
 
+class GatherRequest(BaseModel):
+    topic: str = ""
+    company_name: str = ""
+    user_blurb: str = ""
+    # Optional base64-encoded PDF to OCR via SIE Extract.
+    document_name: str = ""
+    document_b64: str = ""
+
+
+class PipelineRunRequest(BaseModel):
+    question: str = demo.DEMO_QUESTION
+    context_bundle: dict | None = None
+    char_limit: int | None = None
+
+
+class AcceptRequest(BaseModel):
+    question: str = demo.DEMO_QUESTION
+    draft: str
+    final: str
+    char_limit: int | None = None
+    topic: str = ""
+    context: dict | None = None
+    critiques: list[dict] = []
+    planned_ops: list[dict] = []
+    words: list[dict] = []
+    selections: dict = {}
+    personas: list[dict] = []
+    providers: dict = {}
+    session_id: str | None = None
+
+
 # --- Health ----------------------------------------------------------------
 @app.get("/")
 async def root():
@@ -77,65 +118,14 @@ async def health():
 
 
 # --- Helpers ---------------------------------------------------------------
-_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
-
-
-def _strip_fences(text: str) -> str:
-    cleaned = text.strip()
-    cleaned = _FENCE_RE.sub("", cleaned)
-    # Also handle a leading ```json on its own line plus trailing ```.
-    cleaned = re.sub(r"^```(?:json)?", "", cleaned.strip(), flags=re.IGNORECASE)
-    cleaned = re.sub(r"```$", "", cleaned.strip())
-    return cleaned.strip()
-
-
-def _parse_critics_text(text: str, draft: str) -> list[dict]:
-    """Parse the critic JSON, tolerating fences and surrounding prose."""
-    cleaned = _strip_fences(text)
-    try:
-        return _normalize_critics(json.loads(cleaned), draft)
-    except (ValueError, json.JSONDecodeError):
-        pass
-    # Last resort: extract the first [...] array from the text.
-    start = cleaned.find("[")
-    end = cleaned.rfind("]")
-    if start != -1 and end > start:
-        return _normalize_critics(json.loads(cleaned[start : end + 1]), draft)
-    raise ValueError("no JSON array found in critic response")
-
-
-def _normalize_critics(parsed: object, draft: str) -> list[dict]:
-    """Validate the critic array and annotate each item.
-
-    Adds `span_in_draft` (whether span_original is an exact substring of the
-    draft) and `full_rewrite` (whether the span is the entire draft).
-    """
-    if not isinstance(parsed, list):
-        raise ValueError("critic response is not a JSON array")
-
-    critics: list[dict] = []
-    for item in parsed:
-        if not isinstance(item, dict):
-            continue
-        span_original = str(item.get("span_original", ""))
-        critics.append(
-            {
-                "critic": str(item.get("critic", "")),
-                "persona_note": str(item.get("persona_note", "")),
-                "span_original": span_original,
-                "span_replacement": str(item.get("span_replacement", "")),
-                "span_in_draft": span_original in draft,
-                "full_rewrite": span_original.strip() == draft.strip()
-                and bool(span_original.strip()),
-            }
-        )
-    if not critics:
-        raise ValueError("critic response contained no usable items")
-    return critics
+# Parsing helpers live in app/parsing.py so the graph nodes and these handlers
+# behave identically. Thin aliases kept for readability below.
+_strip_fences = parsing.strip_fences
+_parse_critics_text = parsing.parse_critics_text
 
 
 def _demo_critics(draft: str) -> list[dict]:
-    return _normalize_critics([dict(c) for c in demo.DEMO_CRITICS], draft)
+    return parsing.normalize_critics([dict(c) for c in demo.DEMO_CRITICS], draft)
 
 
 def _fallback_meta(error: str) -> dict:
@@ -264,6 +254,93 @@ async def rank(req: RankRequest):
 
     meta["fallback"] = True
     return {"rankings": {}, "source": "static", "meta": meta}
+
+
+# --- Pipeline (LangGraph) --------------------------------------------------
+@app.get("/api/personas")
+async def list_personas():
+    """Built-in persona roster (used by the frontend persona panel)."""
+    return {"personas": personas.builtin_persona_dicts()}
+
+
+@app.post("/api/context/gather")
+async def context_gather(req: GatherRequest):
+    """Context gathering gate: run the gather node and return a ContextBundle.
+
+    Web search is a barebones stub today; PDF ingest runs via SIE Extract when a
+    document is supplied and a gateway is configured. Always returns a ready
+    bundle (fail-soft) so the UI can proceed.
+    """
+    bundle = ContextBundle(
+        topic=req.topic,
+        company_name=req.company_name,
+        user_blurb=req.user_blurb,
+    )
+    initial = bundle.to_dict()
+    if req.document_b64:
+        initial["_pending_doc"] = {
+            "name": req.document_name or "document.pdf",
+            "data_b64": req.document_b64,
+        }
+
+    from .graph import nodes as graph_nodes
+
+    update = await graph_nodes.gather_context({"context_bundle": initial})
+    return {
+        "bundle": update["context_bundle"],
+        "meta": update.get("stage_meta", {}).get("gather", {}),
+    }
+
+
+@app.post("/api/pipeline/run")
+async def pipeline_run(req: PipelineRunRequest):
+    """Run the full graph: parallel meta-harness + draft -> critique -> knapsack."""
+    state = await run_pipeline(
+        question=req.question,
+        context_bundle=req.context_bundle or {},
+        char_limit=req.char_limit,
+    )
+    return {
+        "question": state.get("question"),
+        "context_bundle": state.get("context_bundle"),
+        "personas": state.get("personas", []),
+        "draft": state.get("draft", ""),
+        "draft_source": state.get("draft_source", ""),
+        "critics": state.get("critics", []),
+        "edit_list": state.get("edit_list", []),
+        "planned_ops": state.get("planned_ops", []),
+        "dropped_ops": state.get("dropped_ops", []),
+        "words": state.get("words", []),
+        "result": state.get("result", {}),
+        "final": state.get("final", ""),
+        "stage_meta": state.get("stage_meta", {}),
+    }
+
+
+@app.post("/api/accept")
+async def accept(req: AcceptRequest):
+    """Log an accepted answer as post-training data (single write, on accept)."""
+    # Fold the wordspace plan into the selections blob so the post-training
+    # record captures exactly how the final was assembled (no schema migration).
+    selections = {
+        "selections": req.selections,
+        "planned_ops": req.planned_ops,
+        "words": req.words,
+    }
+    summary = store.record_acceptance(
+        question=req.question,
+        draft=req.draft,
+        final=req.final,
+        char_limit=req.char_limit,
+        topic=req.topic,
+        context=req.context,
+        critiques=req.critiques,
+        selections=selections,
+        personas=req.personas,
+        providers=req.providers,
+        session_id=req.session_id,
+    )
+    return {"ok": True, "stored": summary, "total_records": store.count_records()}
 
 
 # --- Wordspace page --------------------------------------------------------
