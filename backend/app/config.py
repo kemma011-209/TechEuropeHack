@@ -45,6 +45,9 @@ def _get(*keys: str, default: str = "") -> str:
 GEMMA_API_KEY = _get("GEMMA_API_KEY")
 # Tolerate the existing casing typo (SUPERLINKED_API_KEy) in backend/.env.
 SUPERLINKED_API_KEY = _get("SUPERLINKED_API_KEY", "SUPERLINKED_API_KEy")
+# Tavily web search (grounds the context-gathering gate). When empty, web_search
+# fails soft to no results and the pipeline runs on user-provided context only.
+TAVILY_API_KEY = _get("TAVILY_API_KEY")
 
 # --- Models ----------------------------------------------------------------
 # Google Generative Language API. gemini-3.5-flash is the model proven to work
@@ -88,6 +91,10 @@ ALLOWED_ORIGINS = [o.strip() for o in _origins.split(",") if o.strip()]
 
 def superlinked_configured() -> bool:
     return bool(SUPERLINKED_BASE_URL and SUPERLINKED_API_KEY)
+
+
+def tavily_configured() -> bool:
+    return bool(TAVILY_API_KEY)
 
 
 def sie_base_set() -> bool:

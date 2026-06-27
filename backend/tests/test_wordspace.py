@@ -1,6 +1,13 @@
 """Deterministic wordspace op tests (reused module)."""
 
-from app.wordspace import apply_op, apply_ops, apply_ops_tagged
+from app.wordspace import (
+    apply_op,
+    apply_ops,
+    apply_ops_tagged,
+    locate_span,
+    merge_span_edits,
+    tag_words_by_diff,
+)
 
 
 def test_replace():
@@ -88,3 +95,55 @@ def test_tagged_drops_invalid_ops_in_review():
     assert [t["text"] for t in tokens] == ["z", "b"]
     assert len(applied) == 1
     assert len(dropped) == 2  # both invalid ops rejected by review
+
+
+# --- Span-replacement merge (robust matching, no index drift) --------------
+def test_locate_span_exact():
+    draft = "Acme builds data tools."
+    assert locate_span(draft, "data tools") == (12, 22)
+
+
+def test_locate_span_tolerates_whitespace_and_case():
+    draft = "Acme  builds   data tools."
+    # Model quotes it single-spaced and lower-cased; we still find it.
+    loc = locate_span(draft, "builds data tools")
+    assert loc is not None
+    start, end = loc
+    assert draft[start:end].lower().split() == ["builds", "data", "tools"]
+
+
+def test_locate_span_missing_returns_none():
+    assert locate_span("Acme builds tools.", "rocket fuel") is None
+
+
+def test_merge_applies_nonoverlapping_and_tags_new_words():
+    draft = "Acme builds data tools for teams."
+    critics = [
+        {
+            "critic": "VC",
+            "span_original": "data tools",
+            "span_replacement": "products",
+            "full_rewrite": False,
+        }
+    ]
+    improved, applied = merge_span_edits(draft, critics)
+    assert improved == "Acme builds products for teams."
+    assert len(applied) == 1
+    tokens = tag_words_by_diff(draft, improved)
+    assert any(t["text"].startswith("products") and t["source"] == "edit" for t in tokens)
+    assert any(t["text"] == "Acme" and t["source"] == "base" for t in tokens)
+
+
+def test_merge_falls_back_to_full_rewrite_when_no_span_matches():
+    draft = "Acme builds data tools."
+    critics = [
+        {
+            "critic": "Comms",
+            "span_original": draft,
+            "span_replacement": "Acme ships data products.",
+            "full_rewrite": True,
+        }
+    ]
+    improved, applied = merge_span_edits(draft, critics)
+    assert improved == "Acme ships data products."
+    assert len(applied) == 1

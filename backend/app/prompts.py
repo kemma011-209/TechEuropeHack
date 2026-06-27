@@ -67,6 +67,21 @@ def persona_critic_user(question: str, draft: str, knowledge: str) -> str:
     return f"Question: {question}\n\nContext you know:\n{ctx}\n\nDraft: {draft}"
 
 
+# --- Document classifier (grant/competition vs company) --------------------
+DOC_CLASSIFY_SYSTEM = (
+    "You categorise a document supplied with a grant/competition application. "
+    "Decide whether the document is primarily about the GRANT or COMPETITION "
+    "being applied to (its rules, criteria, scope, deadlines, funder) or about "
+    "the COMPANY applying (its product, team, traction, mission). Reply with "
+    "exactly one lowercase word and nothing else: grant or company."
+)
+
+
+def doc_classify_user(name: str, text: str) -> str:
+    excerpt = (text or "").strip()[:4000]
+    return f"Document name: {name}\n\nDocument text:\n{excerpt}"
+
+
 SHORTENER_SYSTEM = (
     "Shorten the following text to under 100 characters while preserving the "
     "core meaning. Return only the shortened text, nothing else."
@@ -112,6 +127,28 @@ WORDSPACE_EDIT_SYSTEM = (
 def wordspace_edit_user(words: list[str], message: str) -> str:
     indexed = " ".join(f"{i}:{w}" for i, w in enumerate(words))
     return f"Current words:\n{indexed}\n\nUser request: {message}"
+
+
+def wordspace_chat_user(
+    words: list[str], message: str, refs: list[int] | None = None
+) -> str:
+    """User turn for the interactive console chat.
+
+    `refs` are word indices the user clicked to point at - we surface them
+    explicitly so the model knows exactly which words the request is about.
+    """
+    indexed = " ".join(f"{i}:{w}" for i, w in enumerate(words))
+    ref_line = ""
+    if refs:
+        picked = ", ".join(
+            f"{i}:'{words[i]}'" for i in refs if 0 <= i < len(words)
+        )
+        if picked:
+            ref_line = (
+                f"\n\nThe user is specifically referring to these words: {picked}. "
+                "Anchor your edit on them unless the request says otherwise."
+            )
+    return f"Current words:\n{indexed}\n\nUser request: {message}{ref_line}"
 
 
 # --- Plan edits (distill critiques -> wordspace op plan) --------------------

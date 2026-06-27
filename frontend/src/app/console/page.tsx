@@ -15,6 +15,22 @@ import type {
 
 type StageMeta = Record<string, Record<string, unknown>>;
 
+// Mirror backend/app/graph/nodes.py value weights so chat-edited words keep the
+// same edit-protection in the budget solver.
+const EDIT_WORD_VALUE = 0.85;
+const BASE_WORD_VALUE = 0.3;
+
+function tokensToWordTokens(
+  tokens: { text: string; source: string }[]
+): WordToken[] {
+  return tokens.map((t, i) => ({
+    index: i,
+    text: t.text,
+    source: t.source === "edit" ? "edit" : "base",
+    value: t.source === "edit" ? EDIT_WORD_VALUE : BASE_WORD_VALUE,
+  }));
+}
+
 async function fileToBase64(file: File): Promise<{ name: string; b64: string }> {
   const dataUrl: string = await new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -27,13 +43,23 @@ async function fileToBase64(file: File): Promise<{ name: string; b64: string }> 
 }
 
 function opLabel(op: PlannedOp): string {
+  // Span-merge ops carry span_original instead of a word index; prefer showing
+  // the original phrase when there's no index (the pipeline edit plan).
+  const target =
+    op.span_original !== undefined
+      ? `"${op.span_original}"`
+      : op.index !== undefined
+        ? `#${op.index}`
+        : "";
   switch (op.op) {
     case "replace":
-      return `replace #${op.index} -> "${op.word}"`;
+      return `replace ${target} -> "${op.word}"`;
     case "insert":
-      return `insert "${op.word}" @ #${op.index}`;
+      return op.index !== undefined
+        ? `insert "${op.word}" @ #${op.index}`
+        : `insert "${op.word}"`;
     case "delete":
-      return `delete #${op.index}`;
+      return `delete ${target}`;
     case "move":
       return `move #${op.from} -> #${op.to}`;
     default:
@@ -46,6 +72,9 @@ export default function ConsolePage() {
   const [topic, setTopic] = useState("Innovate UK Labs of the Future funding");
   const [companyName, setCompanyName] = useState("Armature Labs");
   const [blurb, setBlurb] = useState(DEMO_CONTEXT);
+  const [searchPrompt, setSearchPrompt] = useState(
+    "What are you applying for?"
+  );
   const [pdf, setPdf] = useState<File | null>(null);
   const [bundle, setBundle] = useState<ContextBundle | null>(null);
   const [gathering, setGathering] = useState(false);
@@ -67,6 +96,14 @@ export default function ConsolePage() {
   const [pipelineError, setPipelineError] = useState<string | null>(null);
   const [backendOk, setBackendOk] = useState<boolean | null>(null);
   const [hoveredWord, setHoveredWord] = useState<number | null>(null);
+
+  // --- Interactive chat (tag-aware wordspace edits) ---
+  const [refs, setRefs] = useState<number[]>([]);
+  const [chatMessages, setChatMessages] = useState<
+    { role: "user" | "assistant"; text: string; ops?: PlannedOp[] }[]
+  >([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatSending, setChatSending] = useState(false);
 
   useEffect(() => {
     fetch(`${api.API_BASE}/health`)
@@ -102,6 +139,7 @@ export default function ConsolePage() {
         topic,
         company_name: companyName,
         user_blurb: blurb,
+        search_prompt: searchPrompt,
         document_name: doc?.name,
         document_b64: doc?.b64,
       });
@@ -121,7 +159,7 @@ export default function ConsolePage() {
     } finally {
       setGathering(false);
     }
-  }, [topic, companyName, blurb, pdf]);
+  }, [topic, companyName, blurb, searchPrompt, pdf]);
 
   // --- Stage 2-6: run pipeline ---
   const runPipeline = useCallback(async () => {
@@ -148,6 +186,47 @@ export default function ConsolePage() {
       setRunning(false);
     }
   }, [bundle, question, charLimit]);
+
+  const toggleRef = useCallback((index: number) => {
+    setRefs((prev) =>
+      prev.includes(index)
+        ? prev.filter((i) => i !== index)
+        : [...prev, index]
+    );
+  }, []);
+
+  const sendChat = useCallback(async () => {
+    const message = chatInput.trim();
+    if (!message || chatSending || words.length === 0) return;
+    const sortedRefs = [...refs].sort((a, b) => a - b);
+    const refNote =
+      sortedRefs.length > 0
+        ? ` [refs: ${sortedRefs.map((i) => words[i]?.text).join(", ")}]`
+        : "";
+    setChatMessages((m) => [...m, { role: "user", text: message + refNote }]);
+    setChatInput("");
+    setChatSending(true);
+    try {
+      const res = await api.chatEditWords(
+        words.map((w) => ({ text: w.text, source: w.source })),
+        message,
+        sortedRefs
+      );
+      setWords(tokensToWordTokens(res.tokens));
+      setRefs([]);
+      setChatMessages((m) => [
+        ...m,
+        { role: "assistant", text: res.reply, ops: res.ops as PlannedOp[] },
+      ]);
+    } catch (err) {
+      setChatMessages((m) => [
+        ...m,
+        { role: "assistant", text: `Edit failed: ${String(err)}` },
+      ]);
+    } finally {
+      setChatSending(false);
+    }
+  }, [chatInput, chatSending, words, refs]);
 
   const onAccept = useCallback(async () => {
     try {
@@ -265,6 +344,20 @@ export default function ConsolePage() {
               className="mt-1 w-full border border-black/20 px-3 py-2 text-sm focus:border-black focus:outline-none"
             />
           </label>
+          <label className="mt-3 block">
+            <span className="text-xs text-black/50">
+              Web search prompt (what are you applying for?)
+            </span>
+            <input
+              value={searchPrompt}
+              onChange={(e) => setSearchPrompt(e.target.value)}
+              placeholder="e.g. Innovate UK Labs of the Future eligibility and criteria"
+              className="mt-1 w-full border border-black/20 px-3 py-2 text-sm focus:border-black focus:outline-none"
+            />
+            <span className="mt-1 block text-[11px] text-black/40">
+              Searched live via Tavily and folded into the grounding context.
+            </span>
+          </label>
           <div className="mt-3 flex flex-wrap items-center gap-3">
             <label className="text-xs text-black/50">
               PDF (optional, OCR via SIE):{" "}
@@ -291,6 +384,24 @@ export default function ConsolePage() {
               </span>
             )}
           </div>
+          {bundle &&
+            (bundle.search_results.length > 0 || bundle.documents.length > 0) && (
+              <div className="mt-3 space-y-2 border-t border-black/10 pt-3 text-xs text-black/60">
+                {bundle.documents.map((d, i) => (
+                  <div key={i} className="flex items-center gap-2">
+                    <span className="bg-black px-1.5 py-0.5 text-[10px] uppercase text-white">
+                      {d.category || "unclassified"}
+                    </span>
+                    <span className="truncate">{d.name}</span>
+                  </div>
+                ))}
+                {bundle.search_results.map((s, i) => (
+                  <div key={i} className="truncate">
+                    <span className="text-black/40">search:</span> {s.query}
+                  </div>
+                ))}
+              </div>
+            )}
         </section>
 
         {/* Stage 2: question + run */}
@@ -439,13 +550,15 @@ export default function ConsolePage() {
                     the rewrite
                   </span>
                   <span>faded = trimmed to fit budget</span>
-                  <span>hover a word for its char count</span>
+                  <span>hover = char count</span>
+                  <span>click = add as chat reference</span>
                 </div>
                 <div className="mt-3 border border-black/15 p-4">
                   <p className="text-sm leading-relaxed">
                     {words.map((w, i) => {
                       const kept = keptSet.has(i);
                       const isEdit = w.source === "edit";
+                      const isRef = refs.includes(i);
                       return (
                         <span
                           key={i}
@@ -453,13 +566,18 @@ export default function ConsolePage() {
                           onMouseLeave={() =>
                             setHoveredWord((h) => (h === i ? null : h))
                           }
+                          onClick={() => toggleRef(i)}
                           className={
-                            "relative cursor-default transition-opacity duration-300 " +
+                            "relative cursor-pointer transition-opacity duration-300 " +
                             (kept ? "opacity-100 " : "opacity-25 ") +
                             (isEdit ? "text-blue-500 " : "text-black ") +
-                            (hoveredWord === i ? "bg-black/5 " : "")
+                            (isRef
+                              ? "rounded-sm bg-amber-200/70 ring-1 ring-amber-400 "
+                              : hoveredWord === i
+                                ? "bg-black/5 "
+                                : "")
                           }
-                          title={`${w.source} word`}
+                          title={`${w.source} word · click to reference`}
                         >
                           {hoveredWord === i && (
                             <span className="pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 whitespace-nowrap bg-black px-1.5 py-0.5 text-[10px] text-white">
@@ -540,6 +658,95 @@ export default function ConsolePage() {
                 </div>
               </div>
             </div>
+
+            {/* Chat: request edits directly, anchored on clicked words */}
+            <section className="mt-6 border border-black/15 p-4">
+              <h2 className="text-xs uppercase tracking-wide text-black/50">
+                Chat - request edits (structured ops only)
+              </h2>
+              <p className="mt-1 text-[11px] text-black/40">
+                Click words above to reference them, then ask for a change (e.g.
+                &quot;make this punchier&quot; or &quot;remove this word&quot;).
+                Gemma edits the wordspace via ops - it never free-text rewrites.
+              </p>
+
+              <div className="mt-3 max-h-60 space-y-3 overflow-auto">
+                {chatMessages.length === 0 && (
+                  <p className="text-sm text-black/40">
+                    No messages yet. Selected references:{" "}
+                    {refs.length === 0 ? "none" : refs.length}.
+                  </p>
+                )}
+                {chatMessages.map((m, i) => (
+                  <div key={i} className="text-sm">
+                    <span className="text-black/50">
+                      {m.role === "user" ? "you" : "gemma"}:
+                    </span>{" "}
+                    <span>{m.text}</span>
+                    {m.ops && m.ops.length > 0 && (
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {m.ops.map((op, j) => (
+                          <span
+                            key={j}
+                            className="bg-black/[0.06] px-1.5 py-0.5 text-xs text-black/70"
+                          >
+                            {opLabel(op)}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {m.ops && m.ops.length === 0 && m.role === "assistant" && (
+                      <span className="ml-1 text-xs text-black/30">
+                        (no ops ran)
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              {refs.length > 0 && (
+                <div className="mt-3 flex flex-wrap items-center gap-1">
+                  <span className="text-[11px] text-black/40">references:</span>
+                  {[...refs]
+                    .sort((a, b) => a - b)
+                    .map((i) => (
+                      <button
+                        key={i}
+                        onClick={() => toggleRef(i)}
+                        className="rounded-sm bg-amber-200/70 px-1.5 py-0.5 text-xs ring-1 ring-amber-400"
+                        title="click to remove reference"
+                      >
+                        {words[i]?.text} ×
+                      </button>
+                    ))}
+                  <button
+                    onClick={() => setRefs([])}
+                    className="ml-1 text-[11px] text-black/40 underline"
+                  >
+                    clear
+                  </button>
+                </div>
+              )}
+
+              <div className="mt-3 flex gap-3 border-t border-black/10 pt-3">
+                <input
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") sendChat();
+                  }}
+                  placeholder="tell Gemma how to edit the wordspace"
+                  className="flex-1 border border-black/20 px-3 py-2 text-sm focus:border-black focus:outline-none"
+                />
+                <button
+                  onClick={sendChat}
+                  disabled={chatSending || !chatInput.trim()}
+                  className="bg-black px-4 py-2 text-sm text-white disabled:opacity-40"
+                >
+                  {chatSending ? "..." : "Send"}
+                </button>
+              </div>
+            </section>
           </>
         )}
       </div>

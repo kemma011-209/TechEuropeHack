@@ -10,6 +10,7 @@ import type {
   RankResponse,
   SentenceResponse,
   ShortenResponse,
+  WordspaceChatResponse,
   WordspaceEditResponse,
 } from "./types";
 
@@ -140,11 +141,25 @@ export async function editWordspace(
   }
 }
 
+/** Interactive, tag-aware wordspace edit driven by the console chat. */
+export async function chatEditWords(
+  tokens: { text: string; source: "base" | "edit" }[],
+  message: string,
+  refs: number[]
+): Promise<WordspaceChatResponse> {
+  return post<WordspaceChatResponse>("/api/wordspace/chat", {
+    tokens,
+    message,
+    refs,
+  });
+}
+
 // --- LangGraph pipeline -----------------------------------------------------
 export interface GatherInput {
   topic?: string;
   company_name?: string;
   user_blurb?: string;
+  search_prompt?: string;
   document_name?: string;
   document_b64?: string;
 }

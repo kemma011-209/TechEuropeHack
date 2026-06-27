@@ -83,6 +83,15 @@ export interface WordspaceEditResponse {
   meta: PhaseMeta;
 }
 
+export interface WordspaceChatResponse {
+  tokens: { text: string; source: "base" | "edit" }[];
+  ops: WordOp[];
+  dropped: WordOp[];
+  reply: string;
+  source: string;
+  meta: PhaseMeta;
+}
+
 /** Result of the (legacy) slot knapsack: chosen variant per slot. */
 export interface SolverResult {
   selection: Record<string, string>; // slotId -> variantId
@@ -105,6 +114,7 @@ export interface PlannedOp {
   word?: string;
   from?: number;
   to?: number;
+  span_original?: string;
   source_critic?: string;
   importance?: number;
 }
@@ -135,7 +145,12 @@ export interface ContextBundle {
   topic: string;
   company_name: string;
   user_blurb: string;
-  documents: { name: string; text: string; page_count?: number | null }[];
+  documents: {
+    name: string;
+    text: string;
+    page_count?: number | null;
+    category?: string;
+  }[];
   search_results: { query: string; answer: string; sources: unknown[] }[];
   consolidated_summary: string;
   status: string;

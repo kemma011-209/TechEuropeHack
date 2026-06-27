@@ -23,7 +23,7 @@ async def main() -> None:
     state = await run_pipeline(
         question=demo.DEMO_QUESTION,
         context_bundle=bundle.to_dict(),
-        char_limit=150,
+        char_limit=400,
     )
 
     sm = state.get("stage_meta", {})

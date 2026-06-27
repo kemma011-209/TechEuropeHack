@@ -71,10 +71,24 @@ class WordspaceEditRequest(BaseModel):
     message: str = ""
 
 
+class WordTokenIn(BaseModel):
+    text: str
+    source: str = "base"
+
+
+class WordspaceChatRequest(BaseModel):
+    # Tag-aware: carries provenance so blue (edit) highlights accumulate.
+    tokens: list[WordTokenIn] = []
+    message: str = ""
+    refs: list[int] = []  # indices of words the user clicked as references
+
+
 class GatherRequest(BaseModel):
     topic: str = ""
     company_name: str = ""
     user_blurb: str = ""
+    # Free-text prompt (e.g. "what are you applying for") used to seed web search.
+    search_prompt: str = ""
     # Optional base64-encoded PDF to OCR via SIE Extract.
     document_name: str = ""
     document_b64: str = ""
@@ -267,9 +281,10 @@ async def list_personas():
 async def context_gather(req: GatherRequest):
     """Context gathering gate: run the gather node and return a ContextBundle.
 
-    Web search is a barebones stub today; PDF ingest runs via SIE Extract when a
-    document is supplied and a gateway is configured. Always returns a ready
-    bundle (fail-soft) so the UI can proceed.
+    Web search runs via Tavily (seeded by topic/company and an optional user
+    search prompt); PDF ingest runs via SIE Extract and is then classified as
+    grant vs company context. Always returns a ready bundle (fail-soft) so the
+    UI can proceed.
     """
     bundle = ContextBundle(
         topic=req.topic,
@@ -277,6 +292,8 @@ async def context_gather(req: GatherRequest):
         user_blurb=req.user_blurb,
     )
     initial = bundle.to_dict()
+    if req.search_prompt:
+        initial["_search_prompt"] = req.search_prompt
     if req.document_b64:
         initial["_pending_doc"] = {
             "name": req.document_name or "document.pdf",
@@ -402,5 +419,62 @@ async def wordspace_edit(req: WordspaceEditRequest):
         "ops": [],
         "reply": "Edit service unavailable.",
         "source": "demo",
+        "meta": meta,
+    }
+
+
+@app.post("/api/wordspace/chat")
+async def wordspace_chat(req: WordspaceChatRequest):
+    """Interactive, tag-aware wordspace edit driven by the console chat.
+
+    Takes the current tagged tokens (so existing edits stay blue), the user's
+    message, and the indices of any words they clicked as references. Returns
+    the updated tokens, the ops that ran, and a short reply. Structured ops
+    only - the model never free-text rewrites.
+    """
+    words = [t.text for t in req.tokens]
+    text, meta = await llm.gemma_generate(
+        prompts.WORDSPACE_EDIT_SYSTEM,
+        prompts.wordspace_chat_user(words, req.message, req.refs),
+        max_tokens=4096,
+        thinking_budget=0,
+    )
+
+    current_tokens = [{"text": t.text, "source": t.source} for t in req.tokens]
+    if meta["ok"] and text:
+        try:
+            parsed = parsing.parse_json_object(text)
+            reply = str(parsed.get("reply", ""))
+            ops = parsed.get("ops", [])
+            tokens, applied, dropped = wordspace.apply_ops_to_tokens(
+                current_tokens, ops
+            )
+            return {
+                "tokens": tokens,
+                "ops": applied,
+                "dropped": dropped,
+                "reply": reply or "Done.",
+                "source": "gemma",
+                "meta": meta,
+            }
+        except (ValueError, json.JSONDecodeError) as exc:
+            meta["fallback"] = True
+            meta["error"] = f"chat edit parse failed: {exc}"
+            return {
+                "tokens": current_tokens,
+                "ops": [],
+                "dropped": [],
+                "reply": f"Could not parse that edit ({exc}). Try rephrasing.",
+                "source": "none",
+                "meta": meta,
+            }
+
+    meta["fallback"] = True
+    return {
+        "tokens": current_tokens,
+        "ops": [],
+        "dropped": [],
+        "reply": "Edit service unavailable.",
+        "source": "none",
         "meta": meta,
     }

@@ -25,6 +25,9 @@ class IngestedDocument:
     name: str
     text: str
     page_count: int | None = None
+    # LLM-assigned bucket: "grant" (about the competition/grant being applied
+    # to), "company" (about the applicant), or "" when unclassified.
+    category: str = ""
 
 
 @dataclass
@@ -51,6 +54,7 @@ class ContextBundle:
                 name=str(d.get("name", "")),
                 text=str(d.get("text", "")),
                 page_count=d.get("page_count"),
+                category=str(d.get("category", "")),
             )
             for d in data.get("documents", [])
             if isinstance(d, dict)
@@ -94,7 +98,11 @@ class ContextBundle:
             chunks.append(self.user_blurb.strip())
         for doc in self.documents:
             if doc.text.strip():
-                chunks.append(f"[Document: {doc.name}]\n{doc.text.strip()}")
+                label = {
+                    "grant": "Grant/competition document",
+                    "company": "Company document",
+                }.get(doc.category, "Document")
+                chunks.append(f"[{label}: {doc.name}]\n{doc.text.strip()}")
         for sr in self.search_results:
             if sr.answer.strip():
                 chunks.append(f"[Web: {sr.query}]\n{sr.answer.strip()}")

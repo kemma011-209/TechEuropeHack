@@ -33,23 +33,29 @@ async def gather_context(state: PipelineState) -> dict:
     The pending document (if any) is passed in via context_bundle["_pending_doc"]
     as {"name", "data_b64"} and stripped out after ingestion.
     """
-    bundle = ContextBundle.from_dict(state.get("context_bundle"))
-    pending = (state.get("context_bundle") or {}).get("_pending_doc") or {}
+    raw_bundle = state.get("context_bundle") or {}
+    bundle = ContextBundle.from_dict(raw_bundle)
+    pending = raw_bundle.get("_pending_doc") or {}
+    search_prompt = str(raw_bundle.get("_search_prompt") or "")
 
-    # Web search (barebones stub today; colleague wires the real provider).
-    queries = search.derive_queries(bundle.topic, bundle.company_name)
+    # Web search via Tavily (fail-soft to no results when unconfigured).
+    queries = search.derive_queries(
+        bundle.topic, bundle.company_name, search_prompt
+    )
     search_results: list[SearchResult] = []
-    search_meta = {"provider": "web-search", "ok": True, "fallback": True,
-                   "detail": f"{len(queries)} queries planned (stub)"}
+    search_meta = {"provider": "tavily", "ok": True, "fallback": True,
+                   "detail": f"{len(queries)} queries planned"}
     if queries:
         try:
             search_results = await search.web_search(queries)
             search_meta["fallback"] = len(search_results) == 0
+            search_meta["queries"] = queries
         except Exception as exc:  # noqa: BLE001
-            search_meta = {"provider": "web-search", "ok": False,
+            search_meta = {"provider": "tavily", "ok": False,
                            "fallback": True, "error": str(exc)}
 
-    # Optional PDF ingest via SIE Extract.
+    # Optional PDF ingest via SIE Extract, then LLM classification into
+    # grant/competition vs company so downstream context is labelled.
     documents: list[IngestedDocument] = []
     ingest_meta: dict = {"provider": "sie-extract", "ok": True, "fallback": True,
                          "detail": "no document"}
@@ -58,6 +64,8 @@ async def gather_context(state: PipelineState) -> dict:
             str(pending.get("name", "document.pdf")), str(pending["data_b64"])
         )
         if doc is not None:
+            doc.category, classify_meta = await _classify_document(doc)
+            ingest_meta["classify"] = classify_meta
             documents.append(doc)
 
     merged = merge_bundle(
@@ -67,6 +75,33 @@ async def gather_context(state: PipelineState) -> dict:
         "context_bundle": merged.to_dict(),
         "stage_meta": {"gather": {**search_meta, "documents": len(documents),
                                   "ingest": ingest_meta}},
+    }
+
+
+async def _classify_document(doc: IngestedDocument) -> tuple[str, dict]:
+    """Ask Gemma whether a parsed document is about the grant or the company.
+
+    Returns (category, meta) where category is "grant", "company", or "" when
+    classification was unavailable. Fail-soft: any error yields "" so the
+    document is still ingested, just unlabelled.
+    """
+    text, meta = await llm.gemma_generate(
+        prompts.DOC_CLASSIFY_SYSTEM,
+        prompts.doc_classify_user(doc.name, doc.text),
+        max_tokens=8,
+        thinking_budget=0,
+    )
+    category = ""
+    if meta.get("ok") and text:
+        lowered = text.strip().lower()
+        if "grant" in lowered or "competition" in lowered:
+            category = "grant"
+        elif "company" in lowered:
+            category = "company"
+    return category, {
+        "provider": meta.get("provider"),
+        "ok": meta.get("ok"),
+        "category": category or "unclassified",
     }
 
 

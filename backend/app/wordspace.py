@@ -7,6 +7,7 @@ skipped silently rather than raising.
 """
 
 import difflib
+import re
 from typing import Any
 
 VALID_OPS = {"replace", "insert", "delete", "move"}
@@ -166,6 +167,38 @@ def apply_ops_tagged(
     return tokens, applied, dropped
 
 
+def apply_ops_to_tokens(
+    tokens: list[dict], ops: Any
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Apply ops to ALREADY-tagged tokens, preserving existing provenance.
+
+    Unlike apply_ops_tagged (which starts from all-base words), this keeps the
+    source of untouched words intact - so a word that was already an edit stays
+    an edit, and only newly inserted/replaced words become edit-derived. Used by
+    the interactive chat so the blue highlights accumulate correctly.
+    """
+    current = [
+        {"text": str(t.get("text", "")), "source": str(t.get("source", "base"))}
+        for t in tokens
+    ]
+    applied: list[dict] = []
+    dropped: list[dict] = []
+    if not isinstance(ops, list):
+        return current, applied, dropped
+
+    for op in ops:
+        if not isinstance(op, dict):
+            dropped.append(op)
+            continue
+        new_tokens, changed = _apply_op_tagged(current, op)
+        if changed:
+            current = new_tokens
+            applied.append(op)
+        else:
+            dropped.append(op)
+    return current, applied, dropped
+
+
 # --- Span-replacement merge (robust, no word-index drift) ------------------
 # Critics return {span_original, span_replacement} where span_original is an
 # exact substring of the draft. Applying these as string replacements (instead
@@ -175,36 +208,75 @@ def apply_ops_tagged(
 # are new (edit-derived) so the UI can highlight them.
 
 
+def locate_span(draft: str, span: str) -> tuple[int, int] | None:
+    """Find `span` inside `draft`, tolerating whitespace/case/punctuation drift.
+
+    Models rarely quote the draft verbatim - they collapse spaces, change case,
+    or trim trailing punctuation. We try exact first, then a whitespace- and
+    case-insensitive regex, then a punctuation-trimmed retry. Returns (start,
+    end) in the ORIGINAL draft coordinates, or None.
+    """
+    span = (span or "").strip()
+    if not span:
+        return None
+
+    idx = draft.find(span)  # 1. exact
+    if idx != -1:
+        return idx, idx + len(span)
+
+    tokens = span.split()  # 2. flexible whitespace, case-insensitive
+    if tokens:
+        pattern = r"\s+".join(re.escape(t) for t in tokens)
+        m = re.search(pattern, draft, re.IGNORECASE)
+        if m:
+            return m.start(), m.end()
+
+    trimmed = span.strip(".,;:!?\"'()")  # 3. punctuation-trimmed retry
+    if trimmed and trimmed != span:
+        idx = draft.find(trimmed)
+        if idx != -1:
+            return idx, idx + len(trimmed)
+        toks = trimmed.split()
+        if toks:
+            pattern = r"\s+".join(re.escape(t) for t in toks)
+            m = re.search(pattern, draft, re.IGNORECASE)
+            if m:
+                return m.start(), m.end()
+    return None
+
+
 def merge_span_edits(
     draft: str, critics: list[dict]
 ) -> tuple[str, list[dict]]:
     """Apply non-overlapping critic span replacements to the draft string.
 
     Greedy by coverage: longest spans first, skipping any that overlap a span
-    already chosen. Returns (improved_text, applied) where applied lists the
-    span edits that were actually used (for the UI edit plan).
+    already chosen. Span matching is fuzzy (see locate_span) so we don't silently
+    drop every edit when the model's quote isn't byte-identical. If no partial
+    span matches at all, fall back to the shortest whole-answer rewrite so the
+    user always sees an improvement rather than "0 ops". Returns (improved_text,
+    applied) where applied lists the span edits that were actually used.
     """
     candidates: list[dict] = []
+    rewrites: list[dict] = []
     for c in critics:
         span = str(c.get("span_original", ""))
         repl = str(c.get("span_replacement", ""))
-        if not span or not repl or span == repl:
+        if not span or not repl or span.strip() == repl.strip():
             continue
+        entry = {
+            "span_original": span,
+            "span_replacement": repl,
+            "critic": str(c.get("critic", "Critic")),
+            "persona_note": str(c.get("persona_note", "")),
+        }
         if bool(c.get("full_rewrite")):
-            continue  # skip whole-answer rewrites; they erase structure
-        start = draft.find(span)
-        if start == -1:
+            rewrites.append(entry)
+            continue  # whole-answer rewrites are a last resort (erase structure)
+        loc = locate_span(draft, span)
+        if loc is None:
             continue
-        candidates.append(
-            {
-                "start": start,
-                "end": start + len(span),
-                "span_original": span,
-                "span_replacement": repl,
-                "critic": str(c.get("critic", "Critic")),
-                "persona_note": str(c.get("persona_note", "")),
-            }
-        )
+        candidates.append({**entry, "start": loc[0], "end": loc[1]})
 
     # Longest coverage first so the most substantial improvement wins a conflict.
     candidates.sort(key=lambda x: (x["end"] - x["start"]), reverse=True)
@@ -216,6 +288,12 @@ def merge_span_edits(
             continue  # overlaps an already-chosen span
         chosen.append(cand)
         occupied.append((s, e))
+
+    # Fallback: nothing matched but a critic offered a full rewrite -> use the
+    # shortest one (most likely a tightening) so we never show zero edits.
+    if not chosen and rewrites:
+        best = min(rewrites, key=lambda r: len(r["span_replacement"]))
+        return best["span_replacement"], [best]
 
     # Build the improved string left-to-right from the chosen, ordered by start.
     chosen.sort(key=lambda x: x["start"])
