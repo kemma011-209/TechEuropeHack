@@ -1,13 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { DEMO_CONTEXT, DEMO_QUESTION, MIN_BUDGET, parseCharLimit } from "@/lib/demo";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { MIN_BUDGET, parseCharLimit } from "@/lib/demo";
 import * as api from "@/lib/api";
 import { assembleWords, precomputeAllBudgets, solveWords } from "@/lib/solver";
 import type {
   Critic,
   ContextBundle,
   EditSummary,
+  FitResponse,
   PersonaConfig,
   PlannedOp,
   WordToken,
@@ -69,18 +70,16 @@ function opLabel(op: PlannedOp): string {
 
 export default function ConsolePage() {
   // --- Stage 1: context gathering ---
-  const [topic, setTopic] = useState("Innovate UK Labs of the Future funding");
-  const [companyName, setCompanyName] = useState("Armature Labs");
-  const [blurb, setBlurb] = useState(DEMO_CONTEXT);
-  const [searchPrompt, setSearchPrompt] = useState(
-    "What are you applying for?"
-  );
+  const [topic, setTopic] = useState("");
+  const [companyName, setCompanyName] = useState("");
+  const [blurb, setBlurb] = useState("");
+  const [searchPrompt, setSearchPrompt] = useState("");
   const [pdf, setPdf] = useState<File | null>(null);
   const [bundle, setBundle] = useState<ContextBundle | null>(null);
   const [gathering, setGathering] = useState(false);
 
   // --- Stage 2-6: pipeline outputs ---
-  const [question, setQuestion] = useState(DEMO_QUESTION);
+  const [question, setQuestion] = useState("");
   const [personas, setPersonas] = useState<PersonaConfig[]>([]);
   const [draft, setDraft] = useState("");
   const [draftSource, setDraftSource] = useState("");
@@ -96,6 +95,12 @@ export default function ConsolePage() {
   const [pipelineError, setPipelineError] = useState<string | null>(null);
   const [backendOk, setBackendOk] = useState<boolean | null>(null);
   const [hoveredWord, setHoveredWord] = useState<number | null>(null);
+
+  // --- Grammatical budget fit (knapsack suggests -> LLM glues via ops) ---
+  const [fitResult, setFitResult] = useState<FitResponse | null>(null);
+  const [fitting, setFitting] = useState(false);
+  const [fitError, setFitError] = useState<string | null>(null);
+  const fitCache = useRef<Map<number, FitResponse>>(new Map());
 
   // --- Interactive chat (tag-aware wordspace edits) ---
   const [refs, setRefs] = useState<number[]>([]);
@@ -125,6 +130,44 @@ export default function ConsolePage() {
   const keptSet = useMemo(() => new Set(result.keptIndices), [result]);
   const assembled = useMemo(() => assembleWords(words, result), [words, result]);
   const overBudget = result.totalChars > budget;
+
+  // Grammatical fit: knapsack suggests, the LLM approves deletes + inserts glue
+  // via ops. Runs on slider release (not every tick), cached per budget.
+  const doFit = useCallback(
+    async (target: number) => {
+      if (words.length === 0) return;
+      const cache = fitCache.current;
+      const cached = cache.get(target);
+      if (cached) {
+        setFitResult(cached);
+        return;
+      }
+      setFitting(true);
+      setFitError(null);
+      try {
+        const res = await api.fitToBudget(
+          words.map((w) => ({ text: w.text, source: w.source })),
+          target
+        );
+        cache.set(target, res);
+        setFitResult(res);
+      } catch (err) {
+        setFitError(String(err));
+      } finally {
+        setFitting(false);
+      }
+    },
+    [words]
+  );
+
+  // New words (pipeline run or chat edit) invalidate the cache; re-fit at the
+  // full char limit so the Final starts grammatical.
+  useEffect(() => {
+    fitCache.current = new Map();
+    setFitResult(null);
+    if (words.length > 0) doFit(charLimit);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [words]);
 
   // --- Stage 1: gather ---
   const runGather = useCallback(async () => {
@@ -233,7 +276,7 @@ export default function ConsolePage() {
       const res = await api.accept({
         question,
         draft,
-        final: assembled,
+        final: fitResult?.final ?? assembled,
         char_limit: budget,
         topic,
         context: bundle,
@@ -256,6 +299,7 @@ export default function ConsolePage() {
     question,
     draft,
     assembled,
+    fitResult,
     budget,
     topic,
     bundle,
@@ -549,7 +593,7 @@ export default function ConsolePage() {
                     <span className="text-blue-500">blue</span> = new words from
                     the rewrite
                   </span>
-                  <span>faded = trimmed to fit budget</span>
+                  <span>faded = knapsack suggests cutting</span>
                   <span>hover = char count</span>
                   <span>click = add as chat reference</span>
                 </div>
@@ -613,6 +657,8 @@ export default function ConsolePage() {
                       max={Math.max(charLimit, MIN_BUDGET)}
                       value={budget}
                       onChange={(e) => setBudget(Number(e.target.value))}
+                      onPointerUp={() => doFit(budget)}
+                      onKeyUp={() => doFit(budget)}
                       className="mt-1 w-full accent-black"
                     />
                     <div className="flex justify-between text-xs text-black/40">
@@ -622,29 +668,60 @@ export default function ConsolePage() {
                   </div>
 
                   <div className="mt-5 border-t border-black/10 pt-3">
-                    <span className="text-black/50 text-xs">Final: </span>
-                    <p className="mt-1 text-sm">
-                      {result.keptIndices.map((i) => {
-                        const w = words[i];
-                        if (!w) return null;
-                        return (
+                    <div className="flex items-center justify-between">
+                      <span className="text-black/50 text-xs">
+                        Final (grammatical, ops-applied):
+                      </span>
+                      {fitResult && !fitting && (
+                        <span className="text-[11px] text-black/40">
+                          {fitResult.final.length} chars
+                          {fitResult.guard_drops > 0
+                            ? ` · ${fitResult.guard_drops} guard-trim`
+                            : ""}
+                        </span>
+                      )}
+                    </div>
+                    {fitting ? (
+                      <p className="mt-1 text-sm text-blue-700">
+                        fitting to budget… (knapsack → glue, ~1s)
+                      </p>
+                    ) : fitError ? (
+                      <p className="mt-1 text-sm text-red-600">{fitError}</p>
+                    ) : fitResult ? (
+                      <p className="mt-1 text-sm leading-relaxed">
+                        {fitResult.tokens.map((t, i) => (
                           <span
                             key={i}
-                            className={w.source === "edit" ? "text-blue-500" : ""}
+                            className={
+                              t.source === "glue"
+                                ? "text-gray-400"
+                                : t.source === "edit"
+                                  ? "text-blue-500"
+                                  : ""
+                            }
+                            title={t.source}
                           >
-                            {w.text}{" "}
+                            {t.text}{" "}
                           </span>
-                        );
-                      })}
+                        ))}
+                      </p>
+                    ) : (
+                      <p className="mt-1 text-sm text-black/40">
+                        drag the budget and release to fit.
+                      </p>
+                    )}
+                    <p className="mt-2 text-[11px] text-black/35">
+                      <span className="text-gray-400">grey</span> = connectives the
+                      agent inserted to keep it grammatical.
                     </p>
                   </div>
 
                   <div className="mt-5 border-t border-black/10 pt-3">
                     <button
                       onClick={onAccept}
-                      disabled={overBudget}
+                      disabled={fitting || !fitResult}
                       className="bg-black px-4 py-2 text-sm text-white disabled:opacity-40"
-                      title={overBudget ? "Get under budget first" : ""}
+                      title={fitting ? "Wait for the fit to finish" : ""}
                     >
                       Accept + log training data
                     </button>

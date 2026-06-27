@@ -81,3 +81,9 @@ body {
 .scrollbar-sleek::-webkit-scrollbar-thumb:hover {
   background-color: rgb(163 163 163 / 0.85);
 }
+
+/* Matches ChatInput shell: p-3 + 1lh textarea + gap-2 + h-7 toolbar */
+:root {
+  --composer-shell-height: 5rem;
+  --budget-slider-height: 2.5rem;
+}

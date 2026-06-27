@@ -92,6 +92,17 @@ export interface WordspaceChatResponse {
   meta: PhaseMeta;
 }
 
+export interface LadderVersion {
+  chars: number;
+  text: string;
+}
+
+export interface LadderResponse {
+  versions: LadderVersion[];
+  source: string;
+  meta: PhaseMeta;
+}
+
 /** Result of the (legacy) slot knapsack: chosen variant per slot. */
 export interface SolverResult {
   selection: Record<string, string>; // slotId -> variantId

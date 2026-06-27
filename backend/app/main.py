@@ -83,6 +83,12 @@ class WordspaceChatRequest(BaseModel):
     refs: list[int] = []  # indices of words the user clicked as references
 
 
+class LadderRequest(BaseModel):
+    text: str = ""
+    max_chars: int = 400
+    min_chars: int = 50
+
+
 class GatherRequest(BaseModel):
     topic: str = ""
     company_name: str = ""
@@ -478,3 +484,67 @@ async def wordspace_chat(req: WordspaceChatRequest):
         "source": "none",
         "meta": meta,
     }
+
+
+def _ladder_targets(max_c: int, min_c: int, steps: int = 8) -> list[int]:
+    """Evenly spaced descending target lengths from max_c down to min_c."""
+    if max_c <= min_c or steps <= 1:
+        return [max_c]
+    span = max_c - min_c
+    raw = [int(round(max_c - span * i / (steps - 1))) for i in range(steps)]
+    return sorted({t for t in raw if t > 0}, reverse=True)
+
+
+@app.post("/api/wordspace/ladder")
+async def wordspace_ladder(req: LadderRequest):
+    """Build a stack of progressively shorter, fully grammatical versions.
+
+    One LLM call writes a complete version at each target length; the frontend
+    slider then snaps to the version closest to (and within) the chosen budget.
+    No knapsack, no word trimming - every rung is a whole sentence the model
+    wrote, so it always reads grammatically.
+    """
+    text = (req.text or "").strip()
+    full_len = len(text)
+    if not text:
+        return {
+            "versions": [],
+            "source": "local",
+            "meta": {"provider": "local", "ok": True, "fallback": False},
+        }
+
+    max_c = min(int(req.max_chars), full_len) if full_len else int(req.max_chars)
+    min_c = max(20, min(int(req.min_chars), max_c))
+    targets = _ladder_targets(max_c, min_c)
+
+    out, meta = await llm.gemma_generate(
+        prompts.LADDER_SYSTEM,
+        prompts.ladder_user(text, targets),
+        max_tokens=4096,
+        thinking_budget=0,
+    )
+
+    # The full answer is always the top rung.
+    versions: list[dict] = [{"chars": full_len, "text": text}]
+    if meta["ok"] and out:
+        try:
+            for item in parsing.parse_json_array(out):
+                if isinstance(item, dict):
+                    t = str(item.get("text", "")).strip()
+                    if t:
+                        versions.append({"chars": len(t), "text": t})
+        except (ValueError, json.JSONDecodeError) as exc:
+            meta["error"] = f"ladder parse failed: {exc}"
+            meta["parse_failed"] = True
+
+    # Dedupe by text, sort longest-first.
+    seen: set[str] = set()
+    uniq: list[dict] = []
+    for v in sorted(versions, key=lambda x: x["chars"], reverse=True):
+        if v["text"] in seen:
+            continue
+        seen.add(v["text"])
+        uniq.append(v)
+
+    source = "gemma" if (meta.get("ok") and not meta.get("parse_failed")) else "none"
+    return {"versions": uniq, "source": source, "meta": meta}

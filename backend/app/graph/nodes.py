@@ -9,18 +9,16 @@ console can visualise provider/model/latency/fallback per stage.
 from __future__ import annotations
 
 import asyncio
-import math
 
 from .. import config, demo, llm, parsing, prompts, wordspace
 from ..context.bundle import ContextBundle, IngestedDocument, SearchResult, merge_bundle
 from ..context import ingest, search
 from ..personas import BUILTIN_PERSONAS, PersonaConfig, persona_names
-from . import knapsack
 from .knapsack import WordToken
 from .state import PipelineState
 
-# Value weights for the budget knapsack: edit-derived words are protected above
-# base text, so compression trims filler first.
+# Value weights tagging edit-derived words above base text (used for the UI
+# highlight). The interactive budget ladder is produced by the LLM, not here.
 _BASE_WORD_VALUE = 0.3
 _EDIT_WORD_VALUE = 0.85
 
@@ -384,15 +382,16 @@ async def apply_review(state: PipelineState) -> dict:
     }
 
 
-# --- 6. Budget fit (deterministic word knapsack) ---------------------------
+# --- 6. Assemble (full improved answer; sizing happens via the LLM ladder) --
 async def fit_budget(state: PipelineState) -> dict:
-    """Trim the tagged words to the char limit, protecting edit-derived words.
+    """Assemble the full improved answer. No knapsack.
 
-    Optionally refines word values with the SIE reranker. The character limit is
-    enforced here and nowhere else: deterministic, value-ordered trimming.
+    The draft is improved by the critic span-merge; this node just emits the
+    full assembled text and word list. Fitting to a character budget is done
+    interactively by the LLM "ladder" endpoint (progressively shorter, fully
+    grammatical versions), not by deterministic word trimming.
     """
     draft = state.get("draft", demo.DEMO_DRAFT)
-    char_limit = int(state.get("char_limit") or len(draft))
     words = [WordToken.from_dict(w) for w in state.get("words", [])]
 
     if not words:
@@ -401,37 +400,22 @@ async def fit_budget(state: PipelineState) -> dict:
             for i, w in enumerate(_draft_words(draft))
         ]
 
-    # Optional SIE rerank -> blend into per-word value (graceful: static weights).
-    rank_meta: dict = {"provider": "static", "ok": True, "fallback": True}
-    if words:
-        question = state.get("question", demo.DEMO_QUESTION)
-        items = [{"id": str(w.index), "text": w.text} for w in words]
-        scores, rank_meta = await llm.sie_score(question, items)
-        if scores:
-            for w in words:
-                s = scores.get(str(w.index))
-                if isinstance(s, (int, float)):
-                    sig = 1.0 / (1.0 + math.exp(-float(s)))
-                    # Keep edit-protection: blend reranker with the source prior.
-                    w.value = 0.5 * w.value + 0.5 * sig
-            rank_meta = {**rank_meta, "fallback": False, "provider": "sie"}
-
-    result = knapsack.solve_words(words, char_limit)
-    final = knapsack.assemble_words(words, result)
-
+    final = " ".join(w.text for w in words)
     return {
         "words": [w.to_dict() for w in words],
-        "result": result.to_dict(),
+        "result": {
+            "keptIndices": list(range(len(words))),
+            "totalChars": len(final),
+            "totalValue": 0.0,
+            "feasible": True,
+        },
         "final": final,
         "stage_meta": {
-            "rank": rank_meta,
-            "solver": {
+            "assemble": {
                 "provider": "local",
                 "ok": True,
                 "fallback": False,
-                "char_limit": char_limit,
-                "total_chars": result.total_chars,
-                "feasible": result.feasible,
-            },
+                "chars": len(final),
+            }
         },
     }

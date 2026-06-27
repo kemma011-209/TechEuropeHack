@@ -1,6 +1,7 @@
 """Deterministic wordspace op tests (reused module)."""
 
 from app.wordspace import (
+    apply_indexed_edits,
     apply_op,
     apply_ops,
     apply_ops_tagged,
@@ -132,6 +133,33 @@ def test_merge_applies_nonoverlapping_and_tags_new_words():
     tokens = tag_words_by_diff(draft, improved)
     assert any(t["text"].startswith("products") and t["source"] == "edit" for t in tokens)
     assert any(t["text"] == "Acme" and t["source"] == "base" for t in tokens)
+
+
+def test_indexed_edits_are_drift_free():
+    # Deletes + inserts both reference ORIGINAL indices; applied as one batch.
+    tokens = [
+        {"text": "Acme", "source": "base"},
+        {"text": "builds", "source": "base"},
+        {"text": "fragmented", "source": "base"},
+        {"text": "lab", "source": "base"},
+        {"text": "tools.", "source": "base"},
+    ]
+    # Delete "fragmented" (#2) and "lab" (#3); insert "great" before #4 ("tools.").
+    out, summary = apply_indexed_edits(
+        tokens, [2, 3], [{"before": 4, "word": "great"}]
+    )
+    texts = [t["text"] for t in out]
+    assert texts == ["Acme", "builds", "great", "tools."]
+    assert summary == {"deleted": 2, "inserted": 1}
+    # Inserted word is tagged as glue (so the UI can grey it).
+    assert next(t for t in out if t["text"] == "great")["source"] == "glue"
+
+
+def test_indexed_edits_append_at_end_and_multiword_split():
+    tokens = [{"text": "Acme", "source": "base"}, {"text": "ships.", "source": "base"}]
+    out, summary = apply_indexed_edits(tokens, [], [{"before": 2, "word": "and fast"}])
+    assert [t["text"] for t in out] == ["Acme", "ships.", "and", "fast"]
+    assert summary["inserted"] == 2  # multiword insert split into two glue tokens
 
 
 def test_merge_falls_back_to_full_rewrite_when_no_span_matches():

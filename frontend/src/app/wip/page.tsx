@@ -1,15 +1,72 @@
 "use client";
 
-import { useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import {
+  useCallback,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import ChatPane from "@/components/chat/ChatPane";
 import WordspacePanel from "@/components/wordspace/WordspacePanel";
+import { DEMO_DRAFT } from "@/lib/demo";
+import type { WordToken } from "@/lib/types";
 
 const MIN_RATIO = 0.25;
 const MAX_RATIO = 0.75;
 
+// Mirror backend/app/graph/nodes.py value weights so chat-edited words keep the
+// same edit-protection in the budget solver as base text.
+const EDIT_WORD_VALUE = 0.85;
+const BASE_WORD_VALUE = 0.3;
+
+function tokensToWordTokens(
+  tokens: { text: string; source: string }[],
+): WordToken[] {
+  return tokens.map((t, i) => ({
+    index: i,
+    text: t.text,
+    source: t.source === "edit" ? "edit" : "base",
+    value: t.source === "edit" ? EDIT_WORD_VALUE : BASE_WORD_VALUE,
+  }));
+}
+
+function seedWords(draft: string): WordToken[] {
+  return draft
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((text, index) => ({
+      index,
+      text,
+      source: "base" as const,
+      value: BASE_WORD_VALUE,
+    }));
+}
+
 export default function WipPage() {
   const containerRef = useRef<HTMLDivElement>(null);
   const [ratio, setRatio] = useState(0.5);
+
+  // Shared wordspace state — the chat (left) edits it via Gemma ops, the
+  // wordspace (right) renders + trims it, and clicking words adds refs.
+  const [words, setWords] = useState<WordToken[]>(() => seedWords(DEMO_DRAFT));
+  const [refs, setRefs] = useState<number[]>([]);
+
+  const tokens = useMemo(
+    () => words.map((w) => ({ text: w.text, source: w.source })),
+    [words],
+  );
+  const applyTokens = useCallback(
+    (toks: { text: string; source: string }[]) =>
+      setWords(tokensToWordTokens(toks)),
+    [],
+  );
+  const clearRefs = useCallback(() => setRefs([]), []);
+  const toggleRef = useCallback((index: number) => {
+    setRefs((prev) =>
+      prev.includes(index) ? prev.filter((i) => i !== index) : [...prev, index],
+    );
+  }, []);
 
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     e.preventDefault();
@@ -34,9 +91,16 @@ export default function WipPage() {
 
   return (
     <div ref={containerRef} className="flex h-screen w-full overflow-hidden">
-      {/* Left: chat */}
+      {/* Left: chat (drives Gemma edits on the wordspace) */}
       <div className="relative min-w-0" style={{ flexBasis: `${ratio * 100}%` }}>
-        <ChatPane />
+        <ChatPane
+          wordspace={{
+            tokens,
+            refs,
+            onApplyTokens: applyTokens,
+            onClearRefs: clearRefs,
+          }}
+        />
       </div>
 
       {/* Draggable divider */}
@@ -50,12 +114,12 @@ export default function WipPage() {
         <div className="absolute inset-y-0 left-0 w-px bg-transparent transition-colors group-hover:bg-neutral-300" />
       </div>
 
-      {/* Right: wordspace (what we'll need) */}
+      {/* Right: wordspace */}
       <div
         className="relative min-w-0"
         style={{ flexBasis: `${(1 - ratio) * 100}%` }}
       >
-        <WordspacePanel />
+        <WordspacePanel words={words} refs={refs} onToggleRef={toggleRef} />
       </div>
     </div>
   );

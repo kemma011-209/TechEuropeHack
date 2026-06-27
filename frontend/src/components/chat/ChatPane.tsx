@@ -4,6 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { streamChat, type ChatMessage } from "@/lib/chat";
+import * as api from "@/lib/api";
 import { useAutosizeTextarea } from "@/hooks/useAutosizeTextarea";
 import {
   ArrowDown,
@@ -233,7 +234,7 @@ function ChatInput({
         </div>
       ) : null}
       <div
-        className={`relative z-10 flex flex-col gap-2 p-3 shadow-xs ${shell}`}
+        className={`relative z-10 flex min-h-[var(--composer-shell-height)] flex-col gap-2 p-3 shadow-xs ${shell}`}
       >
       <textarea
         ref={textareaRef}
@@ -498,7 +499,21 @@ function MarkdownAnswer({ content }: { content: string }) {
 
 const STICKY_QUESTIONS = true;
 
-export default function ChatPane() {
+// When provided, the chat drives Gemma wordspace edits (console flow) instead of
+// the generic streaming backend: each message is sent with the current tokens +
+// any clicked-word refs, and the returned tokens replace the wordspace.
+export type WordspaceChatBinding = {
+  tokens: { text: string; source: "base" | "edit" }[];
+  refs: number[];
+  onApplyTokens: (tokens: { text: string; source: "base" | "edit" }[]) => void;
+  onClearRefs: () => void;
+};
+
+export default function ChatPane({
+  wordspace,
+}: {
+  wordspace?: WordspaceChatBinding;
+} = {}) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -614,6 +629,58 @@ export default function ChatPane() {
       setError(null);
       setEditingId(null);
 
+      // --- Wordspace (Gemma edit) flow: send current tokens + refs, apply the
+      // returned tokens to the shared wordspace, reveal the reply text. ---
+      if (wordspace) {
+        const sortedRefs = [...wordspace.refs].sort((a, b) => a - b);
+        const refNote =
+          sortedRefs.length > 0
+            ? ` [refs: ${sortedRefs
+                .map((i) => wordspace.tokens[i]?.text)
+                .filter(Boolean)
+                .join(", ")}]`
+            : "";
+
+        textBuffer.current = "";
+        streamDone.current = false;
+        charDebt.current = 0;
+
+        setMessages((prev) => [
+          ...prev,
+          { role: "user", content: text + refNote },
+          { role: "assistant", content: "" },
+        ]);
+        setStreaming(true);
+        followRef.current = true;
+        scrollToBottom();
+
+        void (async () => {
+          try {
+            const res = await api.chatEditWords(
+              wordspace.tokens,
+              text,
+              sortedRefs,
+            );
+            wordspace.onApplyTokens(res.tokens);
+            wordspace.onClearRefs();
+            textBuffer.current = res.reply || "(no changes)";
+            streamDone.current = true;
+          } catch (err) {
+            setError(String(err));
+            setStreaming(false);
+            setMessages((prev) => {
+              const next = [...prev];
+              const last = next[next.length - 1];
+              if (last && last.role === "assistant" && last.content === "") {
+                next.pop();
+              }
+              return next;
+            });
+          }
+        })();
+        return;
+      }
+
       const userMessage: ChatMessage = { role: "user", content: text };
       const history = [...messages, userMessage];
 
@@ -659,7 +726,7 @@ export default function ChatPane() {
         controller.signal,
       );
     },
-    [messages, streaming, scrollToBottom],
+    [messages, streaming, scrollToBottom, wordspace],
   );
 
   // Interrupt the in-flight stream. Aborts the fetch, stops the reveal loop, and

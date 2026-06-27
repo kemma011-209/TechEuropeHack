@@ -199,6 +199,65 @@ def apply_ops_to_tokens(
     return current, applied, dropped
 
 
+# --- Batch indexed edits (drift-free delete + insert) ----------------------
+# The budget realizer emits delete + insert ops that ALL reference the ORIGINAL
+# word indices. Applying them as a single batch (rather than a mutating
+# sequence) means later ops never see shifted indices - this is what prevents
+# the duplicated/leftover-word artifacts that plague sequential op merging.
+
+
+def apply_indexed_edits(
+    tokens: list[dict], deletes: Any, inserts: Any
+) -> tuple[list[dict], dict]:
+    """Apply deletes + inserts against ORIGINAL indices in one drift-free pass.
+
+    - deletes: iterable of original indices to drop.
+    - inserts: iterable of {"before": <orig index>, "word": <str>}; the word is
+      placed before that original index (index == len appends at the end). Multi-
+      word inserts are split into separate glue tokens.
+
+    Inserted words are tagged source="glue" so the UI can distinguish realizer
+    connectives from base text and critic edits. Returns (new_tokens, summary).
+    """
+    n = len(tokens)
+    del_set: set[int] = set()
+    if isinstance(deletes, list):
+        for d in deletes:
+            idx = _as_index(d)
+            if idx is not None and 0 <= idx < n:
+                del_set.add(idx)
+
+    ins_by_pos: dict[int, list[str]] = {}
+    if isinstance(inserts, list):
+        for ins in inserts:
+            if not isinstance(ins, dict):
+                continue
+            pos = _as_index(ins.get("before"))
+            if pos is None:
+                pos = _as_index(ins.get("index"))  # tolerate alt key
+            raw = ins.get("word")
+            if pos is None or not isinstance(raw, str):
+                continue
+            pos = max(0, min(pos, n))
+            for w in raw.split():
+                if w:
+                    ins_by_pos.setdefault(pos, []).append(w)
+
+    out: list[dict] = []
+    inserted = 0
+    for i in range(n + 1):
+        for w in ins_by_pos.get(i, []):
+            out.append({"text": w, "source": "glue"})
+            inserted += 1
+        if i < n and i not in del_set:
+            t = tokens[i]
+            out.append(
+                {"text": str(t.get("text", "")), "source": str(t.get("source", "base"))}
+            )
+
+    return out, {"deleted": len(del_set), "inserted": inserted}
+
+
 # --- Span-replacement merge (robust, no word-index drift) ------------------
 # Critics return {span_original, span_replacement} where span_original is an
 # exact substring of the draft. Applying these as string replacements (instead

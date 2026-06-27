@@ -169,3 +169,37 @@ def solve_words(words: list[WordToken], budget_chars: int) -> WordResult:
 def assemble_words(words: list[WordToken], result: WordResult) -> str:
     """Join the kept words in original order into the final answer."""
     return " ".join(words[i].text for i in result.kept_indices if 0 <= i < len(words))
+
+
+def suggest_trims(
+    words: list[WordToken], budget_chars: int, reserve_ratio: float = 0.92
+) -> dict:
+    """Advisory only: suggest which word indices to drop to fit the budget.
+
+    The knapsack does NOT decide the final text here - it proposes a removal set
+    that the LLM then approves/adjusts (and re-glues with connectives via ops).
+    We solve at a reduced "content budget" (reserve_ratio of the real budget) so
+    there is room for the connectives the realizer will add back.
+
+    Returns {suggested_delete, kept, projected_chars}. When the answer already
+    fits the budget there is nothing to suggest.
+    """
+    n = len(words)
+    if n == 0:
+        return {"suggested_delete": [], "kept": [], "projected_chars": 0}
+    if assembled_len(words) <= budget_chars:
+        return {
+            "suggested_delete": [],
+            "kept": list(range(n)),
+            "projected_chars": assembled_len(words),
+        }
+
+    content_budget = max(1, int(budget_chars * reserve_ratio))
+    res = solve_words(words, content_budget)
+    kept = set(res.kept_indices)
+    suggested = [i for i in range(n) if i not in kept]
+    return {
+        "suggested_delete": suggested,
+        "kept": sorted(kept),
+        "projected_chars": res.total_chars,
+    }

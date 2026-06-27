@@ -7,6 +7,7 @@ import type {
   PersonaConfig,
   PhaseMeta,
   PipelineRunResponse,
+  LadderResponse,
   RankResponse,
   SentenceResponse,
   ShortenResponse,
@@ -151,6 +152,21 @@ export async function chatEditWords(
     tokens,
     message,
     refs,
+  });
+}
+
+/**
+ * Fit the answer to a char budget: the knapsack suggests trims, the LLM
+ * approves deletes + inserts connectives via structured ops (never a rewrite),
+ * and a deterministic guard enforces the budget.
+ */
+export async function fitToBudget(
+  tokens: { text: string; source: string }[],
+  targetChars: number
+): Promise<FitResponse> {
+  return post<FitResponse>("/api/wordspace/fit", {
+    tokens,
+    target_chars: targetChars,
   });
 }
 

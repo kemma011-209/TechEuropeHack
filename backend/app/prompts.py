@@ -151,6 +151,79 @@ def wordspace_chat_user(
     return f"Current words:\n{indexed}\n\nUser request: {message}{ref_line}"
 
 
+# --- Budget ladder (LLM writes a stack of progressively shorter versions) ---
+LADDER_SYSTEM = (
+    "You shorten a grant application answer into a LADDER of progressively "
+    "shorter versions. You are given the answer and a list of target character "
+    "lengths. Write exactly one version for each target. Every version must:\n"
+    "- be a COMPLETE, fluent, grammatical answer - never a fragment or a list of "
+    "keywords;\n"
+    "- be at or under its target character count, but as CLOSE to the target as "
+    "possible (do not over-shorten);\n"
+    "- keep the company/subject and the single most important claim;\n"
+    "- drop the least important detail first as the target shrinks;\n"
+    "- rephrase and re-connect words freely so it always reads naturally.\n\n"
+    "Return ONLY a JSON array, longest version first, one object per target:\n"
+    '[{"target": <int>, "text": "<version>"}, ...]'
+)
+
+
+def ladder_user(text: str, targets: list[int]) -> str:
+    tlist = ", ".join(str(t) for t in targets)
+    return (
+        f"Answer:\n{text}\n\n"
+        f"Target lengths in characters (write one version for each): {tlist}\n\n"
+        "Return the JSON array only."
+    )
+
+
+# --- Budget fit (knapsack suggests, LLM approves deletes + inserts glue) ----
+FIT_SYSTEM = (
+    "You compress a grant application answer to fit a character budget. The "
+    "answer is an indexed list of words. You may ONLY change it by emitting "
+    "structured operations - NEVER rewrite the text directly.\n\n"
+    "A knapsack has SUGGESTED low-value words to delete. Your job: (1) choose the "
+    "final set of word indices to DELETE - accept the suggestions that make "
+    "sense, and you may delete a few more or keep some; and (2) INSERT short "
+    "connective/function words so the words that remain read as ONE grammatical "
+    "sentence. Inserts must be glue only (e.g. 'and', 'to', 'into', 'for', "
+    "'which', 'that', 'with') - do NOT introduce new facts or content words.\n\n"
+    "Delete as FEW words as possible to reach the target - do not over-trim. The "
+    "result MUST be a single fluent, grammatical sentence that still reads well; "
+    "keep its length as close to the target as you can without exceeding it. "
+    "Never leave dangling fragments like 'data into data layer'.\n\n"
+    "ALL indices refer to the ORIGINAL list. An insert's 'before' is the original "
+    "index the new word goes in front of (use the list length to append at the "
+    "end). Because every index is original, you do not need to account for "
+    "shifting.\n\n"
+    "Keep word 0 (the subject). Keep the result within the target length.\n\n"
+    "Return ONLY this JSON object and nothing else:\n"
+    '{"delete": [<int>, ...], "insert": [{"before": <int>, "word": "<word>"}, '
+    '...], "reply": "<one short sentence>"}'
+)
+
+
+def fit_user(
+    words: list[str], values: list[float], suggested_delete: list[int], target: int
+) -> str:
+    lines = []
+    for i, w in enumerate(words):
+        val = values[i] if i < len(values) else 0.0
+        lines.append(f"{i}: '{w}' (value={val:.2f})")
+    indexed = "\n".join(lines)
+    suggested = ", ".join(str(i) for i in suggested_delete) or "(none)"
+    floor = max(1, target - 25)
+    return (
+        f"Target length: between {floor} and {target} characters (get as close to "
+        f"{target} as possible without exceeding it - do NOT over-shorten).\n\n"
+        f"Words (index: 'word' (value)):\n{indexed}\n\n"
+        f"Knapsack suggests deleting these low-value indices: {suggested}\n\n"
+        "Approve/adjust the deletions and insert connective words so the result "
+        "is one fluent, grammatical sentence within the target. Return the JSON "
+        "object only."
+    )
+
+
 # --- Plan edits (distill critiques -> wordspace op plan) --------------------
 PLAN_EDITS_SYSTEM = (
     "You are an editor improving a grant application answer. The draft is stored "

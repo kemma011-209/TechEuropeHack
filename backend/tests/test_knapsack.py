@@ -81,6 +81,31 @@ def test_infeasible_single_long_word():
     assert res.kept_indices == [0]
 
 
+def test_suggest_trims_only_advises_when_over_budget():
+    words = _words([("Acme", "base", 0.3), ("ships", "base", 0.3)])
+    # Comfortably within budget -> no suggestions.
+    s = knapsack.suggest_trims(words, 100)
+    assert s["suggested_delete"] == []
+    assert s["kept"] == [0, 1]
+
+
+def test_suggest_trims_proposes_low_value_removals():
+    words = _words(
+        [
+            ("Acme", "base", 0.3),          # subject
+            ("builds", "base", 0.3),
+            ("genuinely", "base", 0.2),     # low value filler
+            ("auditable", "edit", 0.9),     # high value
+            ("tools", "base", 0.3),
+        ]
+    )
+    s = knapsack.suggest_trims(words, 20)
+    # It suggests removing something, never the subject, and keeps the edit word.
+    assert len(s["suggested_delete"]) >= 1
+    assert 0 not in s["suggested_delete"]
+    assert 3 in s["kept"]
+
+
 def test_demo_154_trims_to_150():
     assert len(demo.DEMO_DRAFT) > 150
     words = [
