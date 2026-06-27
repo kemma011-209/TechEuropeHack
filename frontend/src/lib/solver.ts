@@ -3,13 +3,13 @@ import type { WordResult, WordToken } from "./types";
 /**
  * Word-level budget fitter (mirrors backend/app/graph/knapsack.py).
  *
- * Trims the answer to a character budget by removing the lowest-value words
- * first (value, then original order). Two properties the UI relies on:
+ * Optimal 0/1 knapsack: selects the subset of words that maximises total kept
+ * value while fitting the character budget, packing the budget as full as
+ * possible. The subject (word 0) is always kept; ties are broken toward using
+ * more characters. Order is preserved on assembly.
  *
- * - Edit-derived words are protected: base filler is dropped before edits.
- * - Monotonic slider: the kept set at a higher budget is a superset of the kept
- *   set at a lower budget, so dragging the budget down removes words and
- *   dragging it back up re-adds the same words.
+ * Note: unlike the old greedy fitter the kept set is NOT monotonic across
+ * budgets - a word may swap in/out as the slider moves to pack better.
  *
  * Pure synchronous JS: never calls an LLM, never asks a model to count chars.
  */
@@ -27,14 +27,13 @@ const STOPWORDS = new Set([
   "their", "its", "this", "these", "those", "then", "via", "using",
 ]);
 
-/** Lower = removed earlier. Mirrors backend _removal_priority. */
-function removalPriority(word: WordToken, index: number): number {
+/** Higher = more valuable to keep. Mirrors backend _keep_value. */
+function keepValue(word: WordToken, index: number): number {
   const text = word.text.replace(/^[.,;:()"']+|[.,;:()"']+$/g, "");
-  let priority = word.value;
-  if (index === 0) priority += 1.0;
-  else if (/^[A-Z]/.test(text)) priority += 0.2;
-  if (STOPWORDS.has(text.toLowerCase())) priority -= 0.15;
-  return priority;
+  let value = word.value;
+  if (index !== 0 && /^[A-Z]/.test(text)) value += 0.2;
+  if (STOPWORDS.has(text.toLowerCase())) value -= 0.15;
+  return value;
 }
 
 export function solveWords(words: WordToken[], budgetChars: number): WordResult {
@@ -44,32 +43,58 @@ export function solveWords(words: WordToken[], budgetChars: number): WordResult 
     return { keptIndices: [], totalChars: 0, totalValue: 0, feasible: true };
   }
 
-  // Removal order: lowest priority first; ties broken from the END so the
-  // opening subject+verb survive. Fixed total order keeps the slider monotonic.
-  const removalOrder = words
-    .map((w, i) => i)
-    .sort(
-      (a, b) =>
-        removalPriority(words[a], a) - removalPriority(words[b], b) || b - a
+  // Space-aware cost: word cost = len+1, capacity = budget+1 (the first kept
+  // word reclaims one space). The subject (word 0) is always kept.
+  const capacity = budget + 1;
+  const cost0 = words[0].text.length + 1;
+  const remaining = capacity - cost0;
+
+  const chosen: number[] = [];
+  if (remaining >= 0 && n > 1) {
+    const items: { cost: number; val: number; idx: number }[] = [];
+    for (let i = 1; i < n; i++) {
+      items.push({ cost: words[i].text.length + 1, val: keepValue(words[i], i), idx: i });
+    }
+    const totalItemCost = items.reduce((s, it) => s + it.cost, 0);
+    const cap = Math.min(remaining, totalItemCost);
+    const m = items.length;
+    // dp[i][c] = best {v: value, w: weight} using first i items within cap c.
+    const dp: { v: number; w: number }[][] = Array.from({ length: m + 1 }, () =>
+      new Array<{ v: number; w: number }>(cap + 1)
     );
-
-  const kept = new Set<number>(words.map((_, i) => i));
-  const currentLen = () =>
-    assembledLen([...kept].sort((a, b) => a - b).map((i) => words[i]));
-
-  let ri = 0;
-  while (currentLen() > budget && kept.size > 1 && ri < n) {
-    kept.delete(removalOrder[ri]);
-    ri += 1;
+    for (let c = 0; c <= cap; c++) dp[0][c] = { v: 0, w: 0 };
+    for (let i = 1; i <= m; i++) {
+      const { cost, val } = items[i - 1];
+      for (let c = 0; c <= cap; c++) {
+        let best = dp[i - 1][c]; // skip item i (same object reference)
+        if (cost <= c) {
+          const prev = dp[i - 1][c - cost];
+          const cv = prev.v + val;
+          const cw = prev.w + cost;
+          if (cv > best.v || (cv === best.v && cw > best.w)) {
+            best = { v: cv, w: cw };
+          }
+        }
+        dp[i][c] = best;
+      }
+    }
+    // Reconstruct: a new object reference at dp[i][c] means item i was taken.
+    let c = cap;
+    for (let i = m; i >= 1; i--) {
+      if (dp[i][c] !== dp[i - 1][c]) {
+        chosen.push(items[i - 1].idx);
+        c -= items[i - 1].cost;
+      }
+    }
   }
 
-  const keptIndices = [...kept].sort((a, b) => a - b);
-  const chosen = keptIndices.map((i) => words[i]);
-  const totalChars = assembledLen(chosen);
+  const keptIndices = [0, ...chosen].sort((a, b) => a - b);
+  const chosenWords = keptIndices.map((i) => words[i]);
+  const totalChars = assembledLen(chosenWords);
   return {
     keptIndices,
     totalChars,
-    totalValue: chosen.reduce((sum, w) => sum + w.value, 0),
+    totalValue: chosenWords.reduce((sum, w) => sum + w.value, 0),
     feasible: totalChars <= budget,
   };
 }

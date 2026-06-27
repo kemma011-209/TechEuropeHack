@@ -29,18 +29,37 @@ def test_edit_words_survive_before_base():
     assert res.total_chars <= 12
 
 
-def test_budget_monotonic_superset():
+def test_optimal_packing_prefers_two_small_over_one_big():
+    # Equal value per word: the optimal knapsack keeps the two short words
+    # rather than the single long one, packing the budget fuller.
     words = _words(
         [
-            ("one", "base", 0.3),
-            ("two", "edit", 0.8),
-            ("three", "base", 0.4),
-            ("four", "edit", 0.9),
+            ("S", "base", 0.3),       # subject (index 0) - always kept
+            ("aa", "base", 0.5),      # len 2
+            ("bbbbb", "base", 0.5),   # len 5
+            ("cc", "base", 0.5),      # len 2
         ]
     )
-    low = set(knapsack.solve_words(words, 8).kept_indices)
-    high = set(knapsack.solve_words(words, 20).kept_indices)
-    assert low.issubset(high)  # sliding up only adds words back
+    res = knapsack.solve_words(words, 7)
+    assert set(res.kept_indices) == {0, 1, 3}  # two small beat one big
+    assert res.total_chars <= 7
+
+
+def test_fills_budget_better_than_dropping_extra():
+    # A long low-value word vs two short high-value words under a tight budget:
+    # the optimiser should keep the high-value pair and use the budget fully.
+    words = _words(
+        [
+            ("Acme", "base", 0.3),         # subject, forced
+            ("scalable", "base", 0.2),     # long, low value
+            ("auditable", "edit", 0.9),    # valuable
+            ("fast", "edit", 0.9),         # valuable
+        ]
+    )
+    res = knapsack.solve_words(words, 20)
+    kept = set(res.kept_indices)
+    assert 2 in kept and 3 in kept  # both edit words retained
+    assert res.total_chars <= 20
 
 
 def test_assemble_preserves_order():
